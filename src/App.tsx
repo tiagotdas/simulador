@@ -12,7 +12,7 @@ import {
  */
 
 // SUBSTITUA PELA SUA URL DE DEPLOY DO GOOGLE APPS SCRIPT
-const GAS_URL = "https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec"; 
+const GAS_URL = "[https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec](https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec)"; 
 
 type OptionType = 'Call' | 'Put';
 type ActionType = 'Buy' | 'Sell';
