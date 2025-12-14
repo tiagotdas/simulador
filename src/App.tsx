@@ -11,8 +11,8 @@ import {
  * CONFIGURAÇÃO E TYPES
  */
 
-// SUBSTITUA PELA SUA URL DE DEPLOY DO GOOGLE APPS SCRIPT
-const GAS_URL = "[https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec](https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec)"; 
+// URL de Produção do Google Apps Script
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec"; 
 
 type OptionType = 'Call' | 'Put';
 type ActionType = 'Buy' | 'Sell';
@@ -667,18 +667,17 @@ export default function OptionsStrategyBuilder() {
     };
 
     try {
-      // Usando no-cors para evitar bloqueio, embora a resposta seja opaca.
-      // Em produção real, usariamos JSONP ou proxy, mas para GAS simples, isso funciona para disparar o POST.
+      // POST ainda usa no-cors devido a restrições do GAS. A confiabilidade é menor, mas funcional para salvar.
       await fetch(GAS_URL, {
         method: 'POST',
         mode: 'no-cors', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      alert("Simulação salva no Google Sheets com sucesso!");
+      alert("Simulação enviada para processamento no Google Sheets!");
     } catch (error) {
       console.error(error);
-      alert("Erro ao salvar. Verifique o console.");
+      alert("Erro ao enviar dados. Verifique a conexão.");
     } finally {
       setIsSaving(false);
     }
@@ -686,12 +685,37 @@ export default function OptionsStrategyBuilder() {
 
   const loadFromSheets = async () => {
     try {
-      const response = await fetch(GAS_URL);
-      const data = await response.json();
+      // CACHE BUSTING: Timestamp evita cache do navegador
+      const auditUrl = `${GAS_URL}?no_cache=${new Date().getTime()}`;
+      
+      const response = await fetch(auditUrl);
+      
+      // Validação de Status HTTP
+      if (!response.ok) {
+        throw new Error(`Erro HTTP: ${response.status}`);
+      }
+
+      const text = await response.text();
+      
+      // Auditoria de Integridade do JSON
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        // Se falhar o parse, provavelmente veio HTML (erro de auth ou script não publicado corretamente)
+        console.error("Payload Recebido (Não-JSON):", text);
+        throw new Error("O servidor retornou um formato inválido. Pode ser um bloqueio de rede corporativa ou conflito de contas Google. Tente em aba anônima.");
+      }
+
+      if (!Array.isArray(data)) {
+         throw new Error("Formato de dados inesperado (não é uma lista).");
+      }
+
       setSavedSimulations(data);
       setShowLoadModal(true);
-    } catch (error) {
-      alert("Erro ao carregar histórico. Verifique se o WebApp GAS está publicado como 'Anyone'.");
+    } catch (error: any) {
+      alert(`Erro de Auditoria: ${error.message}`);
+      console.error(error);
     }
   };
 
@@ -705,7 +729,7 @@ export default function OptionsStrategyBuilder() {
   // --- CALCULATIONS ---
 
   const payoffData = useMemo(() => {
-    // Generate range: +/- 20% of spot
+    // Generate range: +/- 30% of spot
     const range: number[] = [];
     const lower = spotPrice * 0.7;
     const upper = spotPrice * 1.3;
@@ -725,8 +749,6 @@ export default function OptionsStrategyBuilder() {
     if (typeof val === 'string') return val;
     return `$${val.toFixed(2)}`;
   };
-
-  const getPnlColor = (val: number) => val >= 0 ? '#10B981' : '#EF4444';
 
   return (
     <div className="min-h-screen font-sans text-slate-100 bg-[linear-gradient(85.3deg,#111C2C_2.23%,#395D92_232.74%)] p-4 md:p-8 overflow-x-hidden selection:bg-blue-500/30">
