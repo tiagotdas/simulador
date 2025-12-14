@@ -24,11 +24,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          # REMOVIDO: cache: 'npm' (Causa erro se não existir package-lock.json)
+          
       - name: Install dependencies
-        # ALTERAÇÃO AQUI: Mudamos de 'npm ci' para 'npm install'
-        # Isso permite gerar o lockfile dinamicamente, corrigindo o erro de "lock file not found"
+        # IMPORTANTE: Usar 'npm install' para gerar o lockfile se ele faltar
         run: npm install
+
       - name: Build
         run: npm run build
       - name: Upload artifact
