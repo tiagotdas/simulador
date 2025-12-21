@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+// html2canvas carregado dinamicamente para evitar erros de build
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine 
 } from 'recharts';
 import { 
-  Plus, Trash2, Save, Download, TrendingUp, TrendingDown, 
-  Activity, DollarSign, Shield, Zap, LayoutGrid, ChevronDown, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, AlertTriangle, Edit2, RefreshCw
+  Plus, Trash2, Save, Download, Activity, DollarSign, Shield, Zap, LayoutGrid, ChevronDown, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, AlertTriangle, Edit2, RefreshCw, FileText, TrendingUp, TrendingDown
 } from 'lucide-react';
 
 /**
@@ -27,16 +27,15 @@ interface Leg {
   iv?: number;
 }
 
-// Interface enriquecida com detalhes técnicos para auditoria da operação
 interface StrategyTemplate {
   name: string;
   category: 'Bullish' | 'Bearish' | 'Volatility' | 'Income' | 'Hedge';
-  description: string; // Resumo curto
+  description: string;
   details: {
-    thesis: string;       // Visão de mercado
-    mechanics: string;    // Explicação estrutural
-    idealScenario: string;// Cenário ideal
-    greeks: string;       // Perfil de risco
+    thesis: string;
+    mechanics: string;
+    idealScenario: string;
+    greeks: string;
   };
   setup: (spot: number) => Leg[];
 }
@@ -53,7 +52,6 @@ interface Metrics {
   breakevens: number[];
 }
 
-// --- TOAST TYPES ---
 interface Toast {
   id: number;
   message: string;
@@ -117,74 +115,59 @@ const calculateMetrics = (legs: Leg[], payoffData: PayoffPoint[]): Metrics => {
 };
 
 /**
- * STRATEGY FACTORY (45 ESTRATÉGIAS - ENRIQUECIDAS)
+ * STRATEGY FACTORY
  */
 const STRATEGIES: StrategyTemplate[] = [
-  // --- 1. BULLISH (ALTA) ---
+  // BULLISH
   { name: "1. Long Call", category: "Bullish", description: "Compra de Call a seco.", details: { thesis: "Alta direcional forte.", mechanics: "Compra de direito de compra. Alavancagem simples.", idealScenario: "Explosão de preço no curto prazo.", greeks: "Delta+, Gamma+, Theta-, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 2.5 }] },
-  { name: "2. Short Put (Naked Put)", category: "Bullish", description: "Venda de Put a seco.", details: { thesis: "Neutro a levemente altista.", mechanics: "Venda de obrigação de compra. Gera renda (prêmio).", idealScenario: "Preço acima do strike no vencimento.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
-  { name: "3. Bull Call Spread", category: "Bullish", description: "Trava de Alta com Calls.", details: { thesis: "Alta moderada com custo reduzido.", mechanics: "Compra Call ATM, Vende Call OTM para financiar.", idealScenario: "Preço sobe até o strike vendido.", greeks: "Delta+ (menor que Long Call), Theta misto" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }] },
-  { name: "4. Bull Put Spread", category: "Bullish", description: "Trava de Alta com Puts (Credit Spread).", details: { thesis: "Alta moderada ou lateralização (geração de renda).", mechanics: "Vende Put ATM/OTM (caro), Compra Put OTM (barato).", idealScenario: "Preço fica acima do strike vendido.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
-  { name: "5. Call Ratio Spread (1x2)", category: "Bullish", description: "Compra 1 Call ATM e vende 2 Calls OTM.", details: { thesis: "Alta leve. Perde se explodir.", mechanics: "Compra 1 Call, financia vendendo 2 Calls OTM (crédito ou custo zero).", idealScenario: "Preço no vencimento exato no strike vendido.", greeks: "Delta variável, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
-  { name: "6. Risk Reversal (Collar)", category: "Bullish", description: "Collar Zero Cost.", details: { thesis: "Alta com proteção financiada.", mechanics: "Compra Call OTM, financia vendendo Put OTM.", idealScenario: "Alta forte (participa da alta sem custo inicial).", greeks: "Delta+, Vega misto" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }] },
-  { name: "7. Call Backspread", category: "Bullish", description: "Vende 1 Call ATM, Compra 2 Calls OTM.", details: { thesis: "Alta explosiva ou queda forte (Volatilidade).", mechanics: "Inverso do Ratio Spread. Delta positivo forte no OTM.", idealScenario: "Movimento brusco de alta.", greeks: "Gamma+, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
-  { name: "8. Bull Call Ladder", category: "Bullish", description: "Variação do Ratio: Compra 1, Vende 1, Vende 1.", details: { thesis: "Alta moderada com redução de custo.", mechanics: "Estende o lucro do Bull Spread vendendo outra Call mais OTM.", idealScenario: "Preço sobe gradualmente, sem explodir.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "9. Synthetic Long Stock", category: "Bullish", description: "Simula ação: Compra Call ATM, Vende Put ATM.", details: { thesis: "Réplica perfeita do ativo objeto.", mechanics: "Delta 1 sintético. Elimina necessidade de capital total da ação.", idealScenario: "Qualquer alta.", greeks: "Delta 1, Theta 0 (teórico)" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }] },
-
-  // --- 2. BEARISH (BAIXA) ---
-  { name: "10. Long Put", category: "Bearish", description: "Compra de Put a seco.", details: { thesis: "Queda direcional ou proteção (Hedge).", mechanics: "Direito de venda. Ganha com a queda.", idealScenario: "Queda brusca rápida (Gamma e Vega ajudam).", greeks: "Delta-, Gamma+, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 2.5 }] },
-  { name: "11. Short Call (Naked Call)", category: "Bearish", description: "Venda de Call a seco.", details: { thesis: "Neutro a baixista. Risco ilimitado.", mechanics: "Vende direito de compra. Ganha prêmio.", idealScenario: "Preço não sobe acima do strike.", greeks: "Delta-, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }] },
-  { name: "12. Bear Put Spread", category: "Bearish", description: "Trava de Baixa com Puts.", details: { thesis: "Queda moderada com custo definido.", mechanics: "Compra Put ATM, Vende Put OTM para baratear.", idealScenario: "Preço cai até o strike vendido.", greeks: "Delta-, Theta misto" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
-  { name: "13. Bear Call Spread", category: "Bearish", description: "Trava de Baixa com Calls (Credit Spread).", details: { thesis: "Baixa moderada ou lateralização.", mechanics: "Vende Call ATM/OTM, Compra Call OTM superior (tampa risco).", idealScenario: "Preço fica abaixo do strike vendido.", greeks: "Delta-, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "14. Put Ratio Spread (1x2)", category: "Bearish", description: "Compra 1 Put ATM, Vende 2 Puts OTM.", details: { thesis: "Queda moderada. Risco se cair demais.", mechanics: "Financia compra da Put vendendo dobro de Puts OTM.", idealScenario: "Preço no vencimento no strike das vendidas.", greeks: "Delta variável, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 2, price: 1.5 }] },
-  { name: "15. Put Backspread", category: "Bearish", description: "Vende 1 Put ATM, Compra 2 Puts OTM.", details: { thesis: "Hedge contra crash severo.", mechanics: "Vende Put cara, compra muitas Puts baratas. Ganha na explosão da vol.", idealScenario: "Queda catastrófica.", greeks: "Gamma+, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 2, price: 2.0 }] },
-  { name: "16. Bear Put Ladder", category: "Bearish", description: "Escada de Baixa: Compra 1, Vende 1, Vende 1.", details: { thesis: "Queda controlada.", mechanics: "Bear Put Spread + Venda extra de Put mais OTM para financiar.", idealScenario: "Queda suave até o miolo da estrutura.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
-  { name: "17. Synthetic Short Stock", category: "Bearish", description: "Simula venda a descoberto.", details: { thesis: "Aposta na queda linear.", mechanics: "Vende Call ATM, Compra Put ATM. Delta -1 sintético.", idealScenario: "Qualquer queda.", greeks: "Delta -1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "18. Synthetic Put", category: "Bearish", description: "Put sintética usando Call e Ações (simuladas via Call ATM/Put ATM).", details: { thesis: "Replicação de Put.", mechanics: "Short Stock + Long Call. Cria perfil de payoff de Long Put.", idealScenario: "Queda forte.", greeks: "Delta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-
-  // --- 3. VOLATILITY (VEGA LONG) ---
-  { name: "19. Long Straddle", category: "Volatility", description: "Compra Call e Put no mesmo strike.", details: { thesis: "Explosão de preço para qualquer lado.", mechanics: "Compra ATM Call e ATM Put. Custo alto.", idealScenario: "Movimento forte (Earnings, Payroll). Alta da Volatilidade.", greeks: "Gamma++, Vega++, Theta--" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "20. Long Strangle", category: "Volatility", description: "Compra Put OTM e Call OTM.", details: { thesis: "Explosão de preço (custo menor que Straddle).", mechanics: "Compra opções fora do dinheiro. Exige movimento maior para lucrar.", idealScenario: "Movimento muito forte.", greeks: "Vega+, Theta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.5 }] },
-  { name: "21. Strip", category: "Volatility", description: "Straddle Bearish: 2 Puts + 1 Call.", details: { thesis: "Volatilidade com viés de baixa.", mechanics: "Pesa a mão na Put. Lucra mais na queda, mas protege na alta.", idealScenario: "Queda forte com volatilidade.", greeks: "Gamma+, Delta levemente negativo" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 2, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "22. Strap", category: "Volatility", description: "Straddle Bullish: 2 Calls + 1 Put.", details: { thesis: "Volatilidade com viés de alta.", mechanics: "Pesa a mão na Call. Lucra mais na alta.", idealScenario: "Alta forte com volatilidade.", greeks: "Gamma+, Delta levemente positivo" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 2, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "23. Guts", category: "Volatility", description: "Compra Call ITM e Put ITM.", details: { thesis: "Volatilidade (Deep ITM).", mechanics: "Opções ITM têm menos valor extrínseco relativo, comportam-se mais como o ativo.", idealScenario: "Movimento amplo.", greeks: "Delta neutro inicial" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
-  { name: "24. Short Iron Condor (Reverse)", category: "Volatility", description: "Aposta na saída do intervalo.", details: { thesis: "O mercado vai sair da lateralização.", mechanics: "Vende as pontas (asas), compra o miolo. Débito.", idealScenario: "Preço rompe as barreiras do condor.", greeks: "Vega+, Theta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 },] },
-  { name: "25. Short Butterfly (Call)", category: "Volatility", description: "Vende miolo, compra pontas.", details: { thesis: "Explosão de preço (Volatilidade).", mechanics: "Inverso da borboleta. Paga para montar, lucra se sair do meio.", idealScenario: "Preço longe do strike central.", greeks: "Vega+, Theta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  { name: "26. Short Butterfly (Put)", category: "Volatility", description: "Versão com Puts.", details: { thesis: "Explosão de preço.", mechanics: "Mesma lógica da Call, estruturada com Puts.", idealScenario: "Longe do miolo.", greeks: "Vega+, Theta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  { name: "27. Double Ratio", category: "Volatility", description: "Complexa: Compra 1, Vende 2 em ambos os lados.", details: { thesis: "Estabilidade ampla, risco nas pontas extremas.", mechanics: "Combina Call Ratio e Put Ratio. Gera muito crédito.", idealScenario: "Preço fica entre os strikes vendidos.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.02, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.98, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 2, price: 1.5 }] },
-
-  // --- 4. INCOME / THETA (VEGA SHORT) ---
-  { name: "28. Short Straddle", category: "Income", description: "Venda de Call e Put no mesmo strike.", details: { thesis: "Mercado parado. Alta coleta de Theta.", mechanics: "Venda de volatilidade pura ATM. Risco ilimitado.", idealScenario: "Preço estático no strike.", greeks: "Theta++, Vega-, Gamma-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "29. Short Strangle", category: "Income", description: "Venda de Put OTM e Call OTM.", details: { thesis: "Mercado em range amplo.", mechanics: "Venda de volatilidade OTM. Maior probabilidade de lucro que Straddle.", idealScenario: "Preço entre os strikes vendidos.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 2.0 }] },
-  { name: "30. Iron Condor", category: "Income", description: "Strangle vendido com 'asas' compradas para travar o risco (Bull Put + Bear Call).", details: { thesis: "Lateralização com risco definido.", mechanics: "Bull Put Spread + Bear Call Spread. 'Asas' protegem contra cisne negro.", idealScenario: "Preço termina no 'corpo' do condor.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 },] },
-  { name: "31. Iron Butterfly", category: "Income", description: "Straddle travado.", details: { thesis: "Mercado parado com risco definido.", mechanics: "Vende ATM Call/Put, Compra OTM Call/Put para proteção.", idealScenario: "Pin no strike central.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.0 },] },
-  { name: "32. Butterfly (Call)", category: "Income", description: "Borboleta clássica.", details: { thesis: "Alvo preciso de preço.", mechanics: "Compra 1 ITM, Vende 2 ATM, Compra 1 OTM (simetria 1-2-1). Custo baixo.", idealScenario: "Preço no vencimento exato no miolo.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  { name: "33. Butterfly (Put)", category: "Income", description: "Borboleta usando Puts.", details: { thesis: "Alvo preciso de preço.", mechanics: "Estrutura 1-2-1 com Puts. Payoff idêntico à Call Butterfly.", idealScenario: "Preço no miolo.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
-  { name: "34. Broken Wing Butterfly (Call)", category: "Income", description: "Borboleta assimétrica (Crédito).", details: { thesis: "Viés de alta, mas quer renda se ficar parado.", mechanics: "Pula um strike na asa superior (1-2-1 vira 1-2-0.5). Gera crédito inicial.", idealScenario: "Preço estável ou leve alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 0.5 } ] },
-  { name: "35. Broken Wing Butterfly (Put)", category: "Income", description: "Borboleta assimétrica com Puts.", details: { thesis: "Viés de baixa ou neutro.", mechanics: "Asa inferior mais distante. Risco se cair muito, mas lucro se subir (devido ao crédito).", idealScenario: "Estabilidade.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 0.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
-  { name: "36. Christmas Tree (Call)", category: "Income", description: "Variação da Butterfly com strikes progressivos (1-1-1 ao invés de 1-2-1).", details: { thesis: "Alta lenta.", mechanics: "Compra 1 ATM, Vende 1 OTM, Vende 1 OTM+. Perfil mais suave que a Butterfly.", idealScenario: "Alta moderada.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  { name: "37. Christmas Tree (Put)", category: "Income", description: "Variação da Butterfly com Puts e strikes progressivos.", details: { thesis: "Queda lenta.", mechanics: "Compra 1 Put ATM, Vende sequencialmente Puts OTM.", idealScenario: "Queda moderada.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
-  { name: "38. Condor", category: "Income", description: "Iron Condor feito só com Calls (ou Puts).", details: { thesis: "Lateralização.", mechanics: "Estrutura de 4 pernas usando apenas um tipo de opção. Arbitragem de skew.", idealScenario: "Mercado lateral.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 9.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 0.5 }] },
-
-  // --- 5. HEDGE / EXOTIC ---
-  { name: "39. Jade Lizard", category: "Hedge", description: "Venda de Put OTM + Bear Call Spread.", details: { thesis: "Neutro a Altista. Busca volatilidade.", mechanics: "Coleta prêmio gordo na Put e protege a alta com o spread. Sem risco na alta.", idealScenario: "Lateral ou Alta.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "40. Twisted Sister (Call Lizard)", category: "Hedge", description: "Inverso do Jade Lizard: Venda de Call OTM + Bull Put Spread.", details: { thesis: "Neutro a Baixista.", mechanics: "Venda de Call OTM + Bull Put Spread. Sem risco na queda.", idealScenario: "Lateral ou Queda.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
-  { name: "41. Seagull", category: "Hedge", description: "Bull Spread financiado por venda de Put (ou vice-versa).", details: { thesis: "Alta (Hedge cambial/commodities).", mechanics: "Compra Call Spread, financia vendendo Put. Custo zero comum.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.00, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 3.0 }] },
-  { name: "42. Box Spread", category: "Hedge", description: "Arbitragem: Bull Call Spread + Bear Put Spread. Payoff plano (Bond sintético).", details: { thesis: "Empréstimo/Aplicação a taxa livre de risco.", mechanics: "Bull Call Spread + Bear Put Spread nos mesmos strikes. Payoff flat.", idealScenario: "Arbitragem de taxas de juros.", greeks: "Neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
-  { name: "43. Fence", category: "Hedge", description: "Estrutura de range (cerca): Vende Put OTM, Compra Call ATM, Vende Call OTM.", details: { thesis: "Proteção de carteira com custo reduzido.", mechanics: "Collar (Long Put + Short Call) financiado por Short Put OTM. Limita perda e ganho.", idealScenario: "Queda suave ou estabilidade.", greeks: "Delta negativo suave" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "44. Ratio Call Write", category: "Hedge", description: "Compra Sintética de Ação + Venda de 2 Calls OTM (Covered Call alavancada).", details: { thesis: "Neutro a levemente altista. Coleta de prêmio.", mechanics: "Long Stock + Venda de 2 Calls OTM. Risco se subir muito.", idealScenario: "Alta moderada até o strike.", greeks: "Theta++, Delta variável" }, setup: (spot) => [
-      { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 },
-      { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 },
-      { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }
-    ] 
-  },
-  { name: "45. Synthetic Collar", category: "Hedge", description: "Collar em ativo sintético.", details: { thesis: "Proteção total em posição alavancada.", mechanics: "Cria a ação sinteticamente e aplica o Collar. Eficiência de capital.", idealScenario: "Alta moderada.", greeks: "Delta limitado" }, setup: (spot) => [
-      { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 },
-      { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 },
-      { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.5 },
-      { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }
-    ] 
-  }
+  { name: "2. Short Put (Naked)", category: "Bullish", description: "Venda de Put a seco.", details: { thesis: "Neutro a levemente altista.", mechanics: "Venda de obrigação.", idealScenario: "Preço acima do strike.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
+  { name: "3. Bull Call Spread", category: "Bullish", description: "Trava de Alta com Calls.", details: { thesis: "Alta moderada.", mechanics: "Compra Call ATM, Vende Call OTM.", idealScenario: "Sobe até o strike vendido.", greeks: "Delta+, Theta misto" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }] },
+  { name: "4. Bull Put Spread", category: "Bullish", description: "Trava de Alta com Puts.", details: { thesis: "Alta moderada/lateral.", mechanics: "Vende Put ATM, Compra Put OTM.", idealScenario: "Acima do strike vendido.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
+  { name: "5. Call Ratio Spread", category: "Bullish", description: "Compra 1, Vende 2 Calls.", details: { thesis: "Alta leve.", mechanics: "Compra 1 Call, Vende 2 Calls OTM.", idealScenario: "No strike vendido.", greeks: "Delta variável" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
+  { name: "6. Risk Reversal", category: "Bullish", description: "Collar Zero Cost.", details: { thesis: "Alta com proteção.", mechanics: "Compra Call OTM, Vende Put OTM.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }] },
+  { name: "7. Call Backspread", category: "Bullish", description: "Vende 1, Compra 2 Calls.", details: { thesis: "Alta explosiva.", mechanics: "Vende 1 ATM, Compra 2 OTM.", idealScenario: "Movimento brusco.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
+  { name: "8. Bull Call Ladder", category: "Bullish", description: "Ratio estendido.", details: { thesis: "Alta moderada.", mechanics: "Estende lucro do Bull Spread.", idealScenario: "Alta gradual.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
+  { name: "9. Synthetic Long", category: "Bullish", description: "Simula ação.", details: { thesis: "Réplica do ativo.", mechanics: "Compra Call, Vende Put.", idealScenario: "Qualquer alta.", greeks: "Delta 1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }] },
+  // BEARISH
+  { name: "10. Long Put", category: "Bearish", description: "Compra de Put a seco.", details: { thesis: "Queda direcional.", mechanics: "Direito de venda.", idealScenario: "Queda brusca.", greeks: "Delta-, Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 2.5 }] },
+  { name: "11. Short Call (Naked)", category: "Bearish", description: "Venda de Call a seco.", details: { thesis: "Neutro a baixista.", mechanics: "Vende direito de compra.", idealScenario: "Preço não sobe.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }] },
+  { name: "12. Bear Put Spread", category: "Bearish", description: "Trava de Baixa com Puts.", details: { thesis: "Queda moderada.", mechanics: "Compra Put ATM, Vende OTM.", idealScenario: "Cai até strike vendido.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
+  { name: "13. Bear Call Spread", category: "Bearish", description: "Trava de Baixa com Calls.", details: { thesis: "Baixa moderada.", mechanics: "Vende Call ATM, Compra OTM.", idealScenario: "Abaixo do strike.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
+  { name: "14. Put Ratio Spread", category: "Bearish", description: "Compra 1, Vende 2 Puts.", details: { thesis: "Queda moderada.", mechanics: "Financia compra da Put.", idealScenario: "No strike vendido.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 2, price: 1.5 }] },
+  { name: "15. Put Backspread", category: "Bearish", description: "Vende 1, Compra 2 Puts.", details: { thesis: "Crash severo.", mechanics: "Vende cara, compra baratas.", idealScenario: "Queda catastrófica.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 2, price: 2.0 }] },
+  { name: "16. Bear Put Ladder", category: "Bearish", description: "Escada de Baixa.", details: { thesis: "Queda controlada.", mechanics: "Bear Put + Venda extra.", idealScenario: "Queda suave.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
+  { name: "17. Synthetic Short", category: "Bearish", description: "Venda a descoberto.", details: { thesis: "Queda linear.", mechanics: "Vende Call, Compra Put.", idealScenario: "Qualquer queda.", greeks: "Delta -1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
+  { name: "18. Synthetic Put", category: "Bearish", description: "Put com Ação.", details: { thesis: "Replicação de Put.", mechanics: "Short Stock + Long Call.", idealScenario: "Queda forte.", greeks: "Delta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
+  // VOLATILITY
+  { name: "19. Long Straddle", category: "Volatility", description: "Compra Call e Put ATM.", details: { thesis: "Explosão de preço.", mechanics: "Compra Volatilidade pura.", idealScenario: "Movimento forte.", greeks: "Gamma++, Vega++, Theta--" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
+  { name: "20. Long Strangle", category: "Volatility", description: "Compra Put e Call OTM.", details: { thesis: "Explosão (menor custo).", mechanics: "Opções OTM.", idealScenario: "Movimento muito forte.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.5 }] },
+  { name: "21. Strip", category: "Volatility", description: "Straddle Bearish.", details: { thesis: "Volatilidade com viés de baixa.", mechanics: "2 Puts + 1 Call.", idealScenario: "Queda forte.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 2, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
+  { name: "22. Strap", category: "Volatility", description: "Straddle Bullish.", details: { thesis: "Volatilidade com viés de alta.", mechanics: "2 Calls + 1 Put.", idealScenario: "Alta forte.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 2, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
+  { name: "23. Guts", category: "Volatility", description: "Compra ITM.", details: { thesis: "Volatilidade (Deep ITM).", mechanics: "Call/Put ITM.", idealScenario: "Movimento amplo.", greeks: "Delta neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
+  { name: "24. Short Iron Condor", category: "Volatility", description: "Aposta na saída.", details: { thesis: "Sair do intervalo.", mechanics: "Vende pontas, compra miolo.", idealScenario: "Rompe barreiras.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 },] },
+  { name: "25. Short Butterfly (C)", category: "Volatility", description: "Explosão de preço.", details: { thesis: "Alta volatilidade.", mechanics: "Inverso da borboleta.", idealScenario: "Longe do centro.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
+  { name: "26. Short Butterfly (P)", category: "Volatility", description: "Versão com Puts.", details: { thesis: "Explosão de preço.", mechanics: "Com Puts.", idealScenario: "Longe do miolo.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
+  { name: "27. Double Ratio", category: "Volatility", description: "Vende 2 em ambos os lados.", details: { thesis: "Estabilidade ampla.", mechanics: "Call Ratio + Put Ratio.", idealScenario: "Entre strikes vendidos.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.02, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.98, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 2, price: 1.5 }] },
+  // INCOME
+  { name: "28. Short Straddle", category: "Income", description: "Venda ATM.", details: { thesis: "Mercado parado.", mechanics: "Venda de vol ATM.", idealScenario: "Preço estático.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }] },
+  { name: "29. Short Strangle", category: "Income", description: "Venda OTM.", details: { thesis: "Mercado em range.", mechanics: "Venda de vol OTM.", idealScenario: "Entre strikes.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 2.0 }] },
+  { name: "30. Iron Condor", category: "Income", description: "Strangle travado.", details: { thesis: "Lateralização segura.", mechanics: "Bull Put + Bear Call.", idealScenario: "No corpo do condor.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 },] },
+  { name: "31. Iron Butterfly", category: "Income", description: "Straddle travado.", details: { thesis: "Mercado parado seguro.", mechanics: "Vende ATM, protege OTM.", idealScenario: "Pin no central.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.0 },] },
+  { name: "32. Butterfly (Call)", category: "Income", description: "Borboleta clássica.", details: { thesis: "Alvo preciso.", mechanics: "Simetria 1-2-1.", idealScenario: "Exato no miolo.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
+  { name: "33. Butterfly (Put)", category: "Income", description: "Borboleta com Puts.", details: { thesis: "Alvo preciso.", mechanics: "1-2-1 com Puts.", idealScenario: "No miolo.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
+  { name: "34. Broken Wing (C)", category: "Income", description: "Borboleta assimétrica.", details: { thesis: "Viés de alta + renda.", mechanics: "Asa superior quebrada.", idealScenario: "Estável ou alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 0.5 }] },
+  { name: "35. Broken Wing (P)", category: "Income", description: "Borboleta assimétrica P.", details: { thesis: "Viés de baixa + renda.", mechanics: "Asa inferior quebrada.", idealScenario: "Estabilidade.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 0.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
+  { name: "36. Christmas Tree (C)", category: "Income", description: "Borboleta 1-1-1.", details: { thesis: "Alta lenta.", mechanics: "Strikes progressivos.", idealScenario: "Alta moderada.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
+  { name: "37. Christmas Tree (P)", category: "Income", description: "Christmas Tree P.", details: { thesis: "Queda lenta.", mechanics: "Strikes progressivos.", idealScenario: "Queda moderada.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
+  { name: "38. Condor", category: "Income", description: "Condor Call/Put.", details: { thesis: "Lateralização.", mechanics: "4 pernas mesmo tipo.", idealScenario: "Lateral.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 9.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 0.5 }] },
+  // HEDGE
+  { name: "39. Jade Lizard", category: "Hedge", description: "Put + Bear Call.", details: { thesis: "Neutro/Alta.", mechanics: "Coleta prêmio na Put.", idealScenario: "Lateral/Alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
+  { name: "40. Twisted Sister", category: "Hedge", description: "Inverso Jade.", details: { thesis: "Neutro/Baixa.", mechanics: "Venda Call + Bull Put.", idealScenario: "Lateral/Queda.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
+  { name: "41. Seagull", category: "Hedge", description: "Bull Spread financiado.", details: { thesis: "Alta.", mechanics: "Call Spread + Put Short.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.00, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 3.0 }] },
+  { name: "42. Box Spread", category: "Hedge", description: "Arbitragem.", details: { thesis: "Renda Fixa.", mechanics: "Bull Call + Bear Put.", idealScenario: "Arbitragem.", greeks: "Neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
+  { name: "43. Fence", category: "Hedge", description: "Collar + Put Short.", details: { thesis: "Proteção barata.", mechanics: "Limita perda e ganho.", idealScenario: "Queda suave.", greeks: "Delta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
+  { name: "44. Ratio Call Write", category: "Hedge", description: "Covered Call 1x2.", details: { thesis: "Neutro.", mechanics: "Long Stock + 2 Calls Short.", idealScenario: "Alta moderada.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
+  { name: "45. Synthetic Collar", category: "Hedge", description: "Collar em ativo sintético.", details: { thesis: "Proteção total.", mechanics: "Cria a ação sinteticamente e aplica o Collar. Eficiência de capital.", idealScenario: "Alta moderada.", greeks: "Delta limitado" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] }
 ];
 
 const CategoryTranslation: Record<string, string> = {
@@ -307,6 +290,9 @@ export default function OptionsStrategyBuilder() {
   const [editingId, setEditingId] = useState<string | null>(null); // EDIT STATE
   const [showSaveDialog, setShowSaveDialog] = useState(false); // SAVE DIALOG
   
+  // REF PARA EXPORTAÇÃO
+  const reportRef = useRef<HTMLDivElement>(null);
+
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   // Toast Helper
@@ -317,6 +303,17 @@ export default function OptionsStrategyBuilder() {
   };
 
   const removeToast = (id: number) => setToasts(prev => prev.filter(t => t.id !== id));
+
+  useEffect(() => {
+    // Inject html2canvas script
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+    script.async = true;
+    document.body.appendChild(script);
+    return () => {
+      document.body.removeChild(script);
+    }
+  }, []);
 
   useEffect(() => {
     const defaultStrat = STRATEGIES.find(s => s.name.includes("Long Call"));
@@ -350,6 +347,54 @@ export default function OptionsStrategyBuilder() {
 
   const removeLeg = (id: string) => setLegs(legs.filter(l => l.id !== id));
 
+  // --- EXPORT TO IMAGE (Papel de Trabalho) ---
+  const handleExport = async () => {
+    if (!reportRef.current) return;
+    
+    // Check if html2canvas is loaded
+    const html2canvas = (window as any).html2canvas;
+    if (!html2canvas) {
+      addToast("Biblioteca de exportação carregando, tente novamente em instantes.", 'info');
+      return;
+    }
+    
+    addToast("Gerando relatório... aguarde.", 'info');
+    
+    try {
+      await new Promise(r => setTimeout(r, 100)); // Delay para render
+      
+      const canvas = await html2canvas(reportRef.current, {
+        backgroundColor: '#111C2C', 
+        scale: 2, 
+        useCORS: true,
+        onclone: (clonedDoc: any) => {
+          const watermark = clonedDoc.createElement('div');
+          watermark.innerText = `Gerado em: ${new Date().toLocaleString('pt-BR')} | Arquiteto de Opções`;
+          watermark.style.position = 'absolute';
+          watermark.style.bottom = '10px';
+          watermark.style.right = '20px';
+          watermark.style.color = 'rgba(255,255,255,0.3)';
+          watermark.style.fontSize = '10px';
+          watermark.style.fontFamily = 'monospace';
+          const container = clonedDoc.getElementById('report-container');
+          if (container) container.appendChild(watermark);
+        }
+      });
+
+      const image = canvas.toDataURL("image/png");
+      const link = document.createElement("a");
+      const cleanName = strategyName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      link.href = image;
+      link.download = `Papel_Trabalho_${cleanName}_${new Date().toISOString().split('T')[0]}.png`;
+      link.click();
+      
+      addToast("Relatório exportado com sucesso!", 'success');
+    } catch (error) {
+      console.error(error);
+      addToast("Erro ao gerar relatório.", 'error');
+    }
+  };
+
   // --- GAS ACTIONS ---
 
   const handleSaveClick = () => {
@@ -379,7 +424,7 @@ export default function OptionsStrategyBuilder() {
       await fetch(GAS_URL, {
         method: 'POST',
         mode: 'no-cors', 
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(payload)
       });
       
@@ -397,18 +442,17 @@ export default function OptionsStrategyBuilder() {
   };
 
   const deleteSimulation = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+    e.stopPropagation(); 
     if (!confirm("Tem certeza que deseja excluir esta estratégia?")) return;
 
     try {
       await fetch(GAS_URL, {
         method: 'POST',
         mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delete', id })
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'delete', id: String(id) })
       });
       
-      // Optimistic Update
       setSavedSimulations(prev => prev.filter(s => s.id !== id));
       addToast("Estratégia excluída.", 'success');
     } catch (error) {
@@ -488,6 +532,7 @@ export default function OptionsStrategyBuilder() {
           <p className="text-blue-200/60 text-sm mt-1">Simulador e Analisador Avançado de Estratégias</p>
         </div>
         <div className="flex gap-3">
+          <button onClick={handleExport} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-200 transition-all text-sm font-medium"><FileText size={16} /> Exportar Relatório</button>
           <button onClick={loadFromSheets} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-sm font-medium"><Download size={16} /> Carregar</button>
           <button onClick={handleSaveClick} disabled={isSaving} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-500 hover:bg-blue-600 shadow-lg shadow-blue-500/20 transition-all text-sm font-bold text-white">
             {isSaving ? <span className="animate-spin">⌛</span> : (editingId ? <RefreshCw size={16} /> : <Save size={16} />)} 
@@ -496,7 +541,10 @@ export default function OptionsStrategyBuilder() {
         </div>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* ÁREA DE CAPTURA PARA RELATÓRIO (ID importante) */}
+      <div id="report-container" ref={reportRef} className="grid grid-cols-1 lg:grid-cols-3 gap-6 p-4 rounded-xl relative">
+        
+        {/* LEFT COLUMN */}
         <div className="lg:col-span-2 flex flex-col gap-6">
           <Card className="p-5">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -521,7 +569,8 @@ export default function OptionsStrategyBuilder() {
                 <Area type="monotone" dataKey="value" stroke="#519CFF" strokeWidth={2} fill="url(#colorProfit)" />
               </AreaChart>
             </ResponsiveContainer>
-            <div className="px-6 py-4 bg-black/20 border-t border-white/5">
+            {/* Oculta slider no print */}
+            <div className="px-6 py-4 bg-black/20 border-t border-white/5" data-html2canvas-ignore="true">
               <div className="flex justify-between items-center text-xs text-blue-200/50 mb-2"><span>-30%</span><span className="text-white font-bold">Ajuste o Preço para Simular Cenários (What-if)</span><span>+30%</span></div>
               <input type="range" min={spotPrice * 0.7} max={spotPrice * 1.3} step={(spotPrice * 0.6) / 200} value={simulatedSpot} onChange={(e) => setSimulatedSpot(parseFloat(e.target.value))} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-all" />
               <div className="flex justify-between mt-2"><span className="text-xs font-mono text-slate-400">{formatCurrency(spotPrice * 0.7)}</span><button onClick={() => setSimulatedSpot(spotPrice)} className="text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors">Resetar</button><span className="text-xs font-mono text-slate-400">{formatCurrency(spotPrice * 1.3)}</span></div>
@@ -529,17 +578,18 @@ export default function OptionsStrategyBuilder() {
           </Card>
 
           <Card className="p-0 overflow-hidden">
-            <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5"><h3 className="text-sm font-semibold text-blue-200 uppercase tracking-wide flex items-center gap-2"><LayoutGrid size={16} /> Pernas da Estratégia</h3><button onClick={addLeg} className="text-xs bg-blue-500/20 hover:bg-blue-500/40 text-blue-300 px-2 py-1 rounded border border-blue-500/30 transition-colors flex items-center gap-1"><Plus size={14} /> Adicionar Perna</button></div>
+            <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5"><h3 className="text-sm font-semibold text-blue-200 uppercase tracking-wide flex items-center gap-2"><LayoutGrid size={16} /> Pernas da Estratégia</h3><button onClick={addLeg} className="text-xs bg-blue-500/20 hover:bg-blue-500/40 text-blue-300 px-2 py-1 rounded border border-blue-500/30 transition-colors flex items-center gap-1" data-html2canvas-ignore="true"><Plus size={14} /> Adicionar Perna</button></div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
-                <thead className="text-xs text-blue-200/50 uppercase bg-black/20"><tr><th className="px-4 py-3">Ação</th><th className="px-4 py-3">Tipo</th><th className="px-4 py-3">Strike ($)</th><th className="px-4 py-3">Qtd</th><th className="px-4 py-3">Prêmio ($)</th><th className="px-4 py-3"></th></tr></thead>
-                <tbody className="divide-y divide-white/5">{legs.map((leg) => (<tr key={leg.id} className="hover:bg-white/5 transition-colors"><td className="px-4 py-2"><select value={leg.action} onChange={(e) => updateLeg(leg.id, 'action', e.target.value)} className={`bg-transparent font-bold cursor-pointer outline-none ${leg.action === 'Buy' ? 'text-green-400' : 'text-red-400'}`}><option value="Buy" className="bg-slate-800 text-green-400">Compra</option><option value="Sell" className="bg-slate-800 text-red-400">Venda</option></select></td><td className="px-4 py-2"><select value={leg.type} onChange={(e) => updateLeg(leg.id, 'type', e.target.value)} className="bg-transparent text-white cursor-pointer outline-none"><option value="Call" className="bg-slate-800">Call</option><option value="Put" className="bg-slate-800">Put</option></select></td><td className="px-4 py-2"><input type="number" value={leg.strike} onChange={(e) => updateLeg(leg.id, 'strike', parseFloat(e.target.value))} className="bg-black/20 w-24 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" value={leg.quantity} onChange={(e) => updateLeg(leg.id, 'quantity', parseFloat(e.target.value))} className="bg-black/20 w-16 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" step="0.01" value={leg.price} onChange={(e) => updateLeg(leg.id, 'price', parseFloat(e.target.value))} className="bg-black/20 w-20 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2 text-right"><button onClick={() => removeLeg(leg.id)} className="text-white/20 hover:text-red-400 transition-colors"><Trash2 size={16} /></button></td></tr>))}</tbody>
+                <thead className="text-xs text-blue-200/50 uppercase bg-black/20"><tr><th className="px-4 py-3">Ação</th><th className="px-4 py-3">Tipo</th><th className="px-4 py-3">Strike ($)</th><th className="px-4 py-3">Qtd</th><th className="px-4 py-3">Prêmio ($)</th><th className="px-4 py-3" data-html2canvas-ignore="true"></th></tr></thead>
+                <tbody className="divide-y divide-white/5">{legs.map((leg) => (<tr key={leg.id} className="hover:bg-white/5 transition-colors"><td className="px-4 py-2"><select value={leg.action} onChange={(e) => updateLeg(leg.id, 'action', e.target.value)} className={`bg-transparent font-bold cursor-pointer outline-none ${leg.action === 'Buy' ? 'text-green-400' : 'text-red-400'}`}><option value="Buy" className="bg-slate-800 text-green-400">Compra</option><option value="Sell" className="bg-slate-800 text-red-400">Venda</option></select></td><td className="px-4 py-2"><select value={leg.type} onChange={(e) => updateLeg(leg.id, 'type', e.target.value)} className="bg-transparent text-white cursor-pointer outline-none"><option value="Call" className="bg-slate-800">Call</option><option value="Put" className="bg-slate-800">Put</option></select></td><td className="px-4 py-2"><input type="number" value={leg.strike} onChange={(e) => updateLeg(leg.id, 'strike', parseFloat(e.target.value))} className="bg-black/20 w-24 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" value={leg.quantity} onChange={(e) => updateLeg(leg.id, 'quantity', parseFloat(e.target.value))} className="bg-black/20 w-16 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" step="0.01" value={leg.price} onChange={(e) => updateLeg(leg.id, 'price', parseFloat(e.target.value))} className="bg-black/20 w-20 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2 text-right" data-html2canvas-ignore="true"><button onClick={() => removeLeg(leg.id)} className="text-white/20 hover:text-red-400 transition-colors"><Trash2 size={16} /></button></td></tr>))}</tbody>
               </table>
             </div>
             {legs.length === 0 && <div className="p-8 text-center text-white/30 italic">Nenhuma perna definida.</div>}
           </Card>
         </div>
 
+        {/* RIGHT COLUMN */}
         <div className="flex flex-col gap-6">
           <Card className="p-6 bg-gradient-to-br from-[#9CB0CE]/20 to-[#395D92]/30">
             <h3 className="text-xs font-bold text-blue-200 uppercase tracking-widest mb-6 border-b border-white/10 pb-2">Análise da Estrutura</h3>
