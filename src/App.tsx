@@ -368,6 +368,38 @@ export default function OptionsStrategyBuilder() {
         scale: 2, 
         useCORS: true,
         onclone: (clonedDoc: any) => {
+          const container = clonedDoc.getElementById('report-container');
+          
+          // Fix Inputs: Replace with styled divs
+          const inputs = container.querySelectorAll('input');
+          inputs.forEach((input: any) => {
+            if (input.type !== 'range' && input.type !== 'checkbox' && input.type !== 'radio') {
+              const div = clonedDoc.createElement('div');
+              div.innerText = input.value;
+              div.className = input.className;
+              div.style.display = 'flex';
+              div.style.alignItems = 'center';
+              div.style.overflow = 'visible';
+              input.parentNode.replaceChild(div, input);
+            }
+          });
+
+          // Fix Selects: Replace with styled divs
+          const selects = container.querySelectorAll('select');
+          selects.forEach((select: any) => {
+             const div = clonedDoc.createElement('div');
+             const selectedText = select.options[select.selectedIndex]?.text || select.value;
+             div.innerText = selectedText;
+             div.className = select.className;
+             div.style.display = 'flex';
+             div.style.alignItems = 'center';
+             div.style.overflow = 'visible';
+             // Remove appearance-none to standard div behavior
+             div.classList.remove('appearance-none');
+             select.parentNode.replaceChild(div, select);
+          });
+          
+          // Watermark
           const watermark = clonedDoc.createElement('div');
           watermark.innerText = `Gerado em: ${new Date().toLocaleString('pt-BR')} | Arquiteto de Opções`;
           watermark.style.position = 'absolute';
@@ -376,7 +408,6 @@ export default function OptionsStrategyBuilder() {
           watermark.style.color = 'rgba(255,255,255,0.3)';
           watermark.style.fontSize = '10px';
           watermark.style.fontFamily = 'monospace';
-          const container = clonedDoc.getElementById('report-container');
           if (container) container.appendChild(watermark);
         }
       });
