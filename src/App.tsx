@@ -4,7 +4,7 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine 
 } from 'recharts';
 import { 
-  Plus, Trash2, Save, Download, Activity, DollarSign, Shield, Zap, LayoutGrid, ChevronDown, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, AlertTriangle, Edit2, RefreshCw, FileText, TrendingUp, TrendingDown
+  Plus, Trash2, Save, Download, Activity, DollarSign, Shield, Zap, LayoutGrid, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, AlertTriangle, Edit2, RefreshCw, FileText, TrendingUp, TrendingDown
 } from 'lucide-react';
 
 /**
@@ -14,7 +14,7 @@ import {
 // URL do Google Apps Script (Backend)
 const GAS_URL = "https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec"; 
 
-type OptionType = 'Call' | 'Put';
+type OptionType = 'Call' | 'Put' | 'Stock';
 type ActionType = 'Buy' | 'Sell';
 
 interface Leg {
@@ -66,7 +66,9 @@ const generateUUID = () => Math.random().toString(36).substr(2, 9);
 
 const getOptionValueAtExpiry = (type: OptionType, strike: number, spot: number) => {
   if (type === 'Call') return Math.max(0, spot - strike);
-  return Math.max(0, strike - spot);
+  if (type === 'Put') return Math.max(0, strike - spot);
+  if (type === 'Stock') return spot; // A Ação simplesmente vale o spot
+  return 0;
 };
 
 const calculatePayoff = (legs: Leg[], spotRange: number[]) => {
@@ -87,31 +89,54 @@ const calculatePayoff = (legs: Leg[], spotRange: number[]) => {
 
 const calculateMetrics = (legs: Leg[], payoffData: PayoffPoint[]): Metrics => {
   let cost = 0;
+  let deltaAtInfinity = 0; 
+  let payoffAtZero = 0;
+
   legs.forEach(leg => {
     const legCost = leg.quantity * leg.price;
-    if (leg.action === 'Buy') cost += legCost;
+    const isBuy = leg.action === 'Buy';
+    
+    // Custo
+    if (isBuy) cost += legCost;
     else cost -= legCost;
+
+    // Comportamento no Infinito (Apenas Calls e Stock exercem influência linear direcional no infinito)
+    if (leg.type === 'Call' || leg.type === 'Stock') {
+      deltaAtInfinity += isBuy ? leg.quantity : -leg.quantity;
+    }
+
+    // Comportamento no Zero
+    const valueZero = getOptionValueAtExpiry(leg.type, leg.strike, 0);
+    const pnlZero = isBuy 
+      ? (valueZero * leg.quantity) - legCost 
+      : legCost - (valueZero * leg.quantity);
+    payoffAtZero += pnlZero;
   });
 
   const values = payoffData.map(p => p.value);
-  const maxVal = Math.max(...values);
-  const minVal = Math.min(...values);
-  
+  let maxProfit: number | string = Math.max(...values, payoffAtZero);
+  let maxLoss: number | string = Math.min(...values, payoffAtZero);
+
+  // Define infinitos baseado na exposição final das Calls e Stock
+  if (deltaAtInfinity > 0) maxProfit = "Ilimitado";
+  if (deltaAtInfinity < 0) maxLoss = "Ilimitado";
+
+  // Cálculo preciso de Breakevens via Interpolação Linear
   const breakevens: number[] = [];
   for (let i = 1; i < payoffData.length; i++) {
     const prev = payoffData[i-1];
     const curr = payoffData[i];
-    if ((prev.value < 0 && curr.value >= 0) || (prev.value > 0 && curr.value <= 0)) {
-      breakevens.push(parseFloat(curr.price.toFixed(2)));
+    
+    if (prev.value * curr.value <= 0 && prev.value !== curr.value) {
+      // Fórmula da Interpolação: x = x1 - y1 * (x2 - x1) / (y2 - y1)
+      const exactZero = prev.price - prev.value * (curr.price - prev.price) / (curr.value - prev.value);
+      breakevens.push(parseFloat(exactZero.toFixed(2)));
     }
   }
 
-  return {
-    cost,
-    maxProfit: maxVal > 100000 ? "Ilimitado" : maxVal,
-    maxLoss: minVal < -100000 ? "Ilimitado" : minVal,
-    breakevens
-  };
+  const uniqueBreakevens = Array.from(new Set(breakevens));
+
+  return { cost, maxProfit, maxLoss, breakevens: uniqueBreakevens };
 };
 
 /**
@@ -147,8 +172,8 @@ const STRATEGIES: StrategyTemplate[] = [
   { name: "24. Reverse Iron Condor", category: "Volatility", description: "Aposta na explosão (Long).", details: { thesis: "Sair do intervalo.", mechanics: "Compra pontas internas, vende externas.", idealScenario: "Rompe barreiras fortemente.", greeks: "Vega+, Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
   { name: "25. Short Butterfly (C)", category: "Volatility", description: "Explosão de preço.", details: { thesis: "Alta volatilidade.", mechanics: "Inverso da borboleta.", idealScenario: "Longe do centro.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
   { name: "26. Short Butterfly (P)", category: "Volatility", description: "Versão com Puts.", details: { thesis: "Explosão de preço.", mechanics: "Com Puts.", idealScenario: "Longe do miolo.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  { name: "27. Double Ratio", category: "Income", description: "Vende 2 em ambos os lados.", details: { thesis: "Estabilidade ampla.", mechanics: "Call Ratio + Put Ratio.", idealScenario: "Preço parado entre strikes vendidos.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.02, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.98, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 2, price: 1.5 }] },
   // INCOME
+  { name: "27. Double Ratio", category: "Income", description: "Vende 2 em ambos os lados.", details: { thesis: "Estabilidade ampla.", mechanics: "Call Ratio + Put Ratio.", idealScenario: "Preço parado entre strikes vendidos.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.02, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.98, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 2, price: 1.5 }] },
   { name: "28. Short Straddle", category: "Income", description: "Venda ATM.", details: { thesis: "Mercado parado.", mechanics: "Venda de vol ATM.", idealScenario: "Preço estático.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }] },
   { name: "29. Short Strangle", category: "Income", description: "Venda OTM.", details: { thesis: "Mercado em range.", mechanics: "Venda de vol OTM.", idealScenario: "Entre strikes.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 2.0 }] },
   { name: "30. Iron Condor", category: "Income", description: "Strangle travado.", details: { thesis: "Lateralização segura.", mechanics: "Bull Put + Bear Call.", idealScenario: "No corpo do condor.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 },] },
@@ -166,7 +191,7 @@ const STRATEGIES: StrategyTemplate[] = [
   { name: "41. Seagull", category: "Hedge", description: "Bull Spread financiado.", details: { thesis: "Alta.", mechanics: "Call Spread + Put Short.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.00, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 3.0 }] },
   { name: "42. Box Spread", category: "Hedge", description: "Arbitragem.", details: { thesis: "Renda Fixa.", mechanics: "Bull Call + Bear Put.", idealScenario: "Arbitragem.", greeks: "Neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
   { name: "43. Fence (Collar Options)", category: "Hedge", description: "Risk Reversal Protetivo.", details: { thesis: "Proteção de carteira.", mechanics: "Compra Put financiada por Venda de Call OTM.", idealScenario: "Mercado cai (protege carteira física).", greeks: "Delta-, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.5 }] },
-  { name: "44. Ratio Call Write", category: "Hedge", description: "Covered Call 1x2.", details: { thesis: "Neutro.", mechanics: "Long Stock + 2 Calls Short.", idealScenario: "Alta moderada.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
+  { name: "44. Ratio Call Write", category: "Hedge", description: "Covered Call 1x2.", details: { thesis: "Neutro.", mechanics: "Long Stock + 2 Calls Short.", idealScenario: "Alta moderada.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Stock', action: 'Buy', strike: spot, quantity: 1, price: spot }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
   { name: "45. Synthetic Collar", category: "Hedge", description: "Collar em ativo sintético.", details: { thesis: "Proteção total.", mechanics: "Cria a ação sinteticamente e aplica o Collar. Eficiência de capital.", idealScenario: "Alta moderada.", greeks: "Delta limitado" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] }
 ];
 
@@ -214,7 +239,6 @@ const Select = ({ label, value, onChange, options }: any) => (
   </div>
 );
 
-// --- TOAST COMPONENT ---
 const ToastContainer = ({ toasts, removeToast }: { toasts: Toast[], removeToast: (id: number) => void }) => {
   return (
     <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none">
@@ -244,13 +268,12 @@ const ToastContainer = ({ toasts, removeToast }: { toasts: Toast[], removeToast:
   );
 };
 
-// --- DIALOG COMPONENT (SIMPLE) ---
 const SaveDialog = ({ onClose, onSaveNew, onUpdate, strategyName }: any) => (
   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
     <Card className="w-full max-w-md bg-[#111C2C] p-6 flex flex-col gap-4">
       <h3 className="text-lg font-bold text-white">Salvar Estratégia</h3>
       <p className="text-sm text-white/70">
-        Você está editando "{strategyName}". Deseja atualizar a versão existente ou criar uma nova?
+        Está a editar "{strategyName}". Deseja atualizar a versão existente ou criar uma nova?
       </p>
       <div className="flex flex-col gap-2 mt-2">
         <button 
@@ -287,15 +310,12 @@ export default function OptionsStrategyBuilder() {
   const [isSaving, setIsSaving] = useState(false);
   const [showLoadModal, setShowLoadModal] = useState(false);
   const [savedSimulations, setSavedSimulations] = useState<any[]>([]);
-  const [editingId, setEditingId] = useState<string | null>(null); // EDIT STATE
-  const [showSaveDialog, setShowSaveDialog] = useState(false); // SAVE DIALOG
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
   
-  // REF PARA EXPORTAÇÃO
   const reportRef = useRef<HTMLDivElement>(null);
-
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  // Toast Helper
   const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = Date.now();
     setToasts(prev => [...prev, { id, message, type }]);
@@ -305,7 +325,6 @@ export default function OptionsStrategyBuilder() {
   const removeToast = (id: number) => setToasts(prev => prev.filter(t => t.id !== id));
 
   useEffect(() => {
-    // Inject html2canvas script
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
     script.async = true;
@@ -330,7 +349,7 @@ export default function OptionsStrategyBuilder() {
     if (selected) {
       setStrategyName(selected.name);
       setLegs(selected.setup(spotPrice));
-      setEditingId(null); // Reset edit when template changes
+      setEditingId(null);
       addToast(`Estratégia ${selected.name} carregada`, 'info');
     } else {
       setStrategyName("Estratégia Personalizada");
@@ -347,21 +366,19 @@ export default function OptionsStrategyBuilder() {
 
   const removeLeg = (id: string) => setLegs(legs.filter(l => l.id !== id));
 
-  // --- EXPORT TO IMAGE (Papel de Trabalho) ---
   const handleExport = async () => {
     if (!reportRef.current) return;
     
-    // Check if html2canvas is loaded
     const html2canvas = (window as any).html2canvas;
     if (!html2canvas) {
-      addToast("Biblioteca de exportação carregando, tente novamente em instantes.", 'info');
+      addToast("A carregar biblioteca de exportação, tente novamente em instantes.", 'info');
       return;
     }
     
-    addToast("Gerando relatório... aguarde.", 'info');
+    addToast("A gerar relatório de trabalho... aguarde.", 'info');
     
     try {
-      await new Promise(r => setTimeout(r, 100)); // Delay para render
+      await new Promise(r => setTimeout(r, 100));
       
       const canvas = await html2canvas(reportRef.current, {
         backgroundColor: '#111C2C', 
@@ -370,7 +387,6 @@ export default function OptionsStrategyBuilder() {
         onclone: (clonedDoc: any) => {
           const container = clonedDoc.getElementById('report-container');
           
-          // Fix Inputs: Replace with styled divs
           const inputs = container.querySelectorAll('input');
           inputs.forEach((input: any) => {
             if (input.type !== 'range' && input.type !== 'checkbox' && input.type !== 'radio') {
@@ -384,7 +400,6 @@ export default function OptionsStrategyBuilder() {
             }
           });
 
-          // Fix Selects: Replace with styled divs
           const selects = container.querySelectorAll('select');
           selects.forEach((select: any) => {
              const div = clonedDoc.createElement('div');
@@ -394,12 +409,10 @@ export default function OptionsStrategyBuilder() {
              div.style.display = 'flex';
              div.style.alignItems = 'center';
              div.style.overflow = 'visible';
-             // Remove appearance-none to standard div behavior
              div.classList.remove('appearance-none');
              select.parentNode.replaceChild(div, select);
           });
           
-          // Watermark
           const watermark = clonedDoc.createElement('div');
           watermark.innerText = `Gerado em: ${new Date().toLocaleString('pt-BR')} | Arquiteto de Opções`;
           watermark.style.position = 'absolute';
@@ -425,8 +438,6 @@ export default function OptionsStrategyBuilder() {
       addToast("Erro ao gerar relatório.", 'error');
     }
   };
-
-  // --- GAS ACTIONS ---
 
   const handleSaveClick = () => {
     if (editingId) {
@@ -454,19 +465,19 @@ export default function OptionsStrategyBuilder() {
     try {
       await fetch(GAS_URL, {
         method: 'POST',
-        mode: 'no-cors', 
+        // Sem mode: 'no-cors' para capturar respostas corretas do backend
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(payload)
       });
       
-      const msg = action === 'update' ? "Estratégia atualizada com sucesso!" : "Nova estratégia salva com sucesso!";
+      const msg = action === 'update' ? "Estratégia atualizada com sucesso!" : "Nova estratégia guardada com sucesso!";
       addToast(msg, 'success');
       
       if (action === 'create') setEditingId(null);
 
     } catch (error) {
       console.error(error);
-      addToast("Erro de conexão ao salvar.", 'error');
+      addToast("Erro de ligação ao guardar os registos.", 'error');
     } finally {
       setIsSaving(false);
     }
@@ -474,12 +485,11 @@ export default function OptionsStrategyBuilder() {
 
   const deleteSimulation = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation(); 
-    if (!confirm("Tem certeza que deseja excluir esta estratégia?")) return;
+    if (!confirm("Tem a certeza que deseja excluir esta estratégia?")) return;
 
     try {
       await fetch(GAS_URL, {
         method: 'POST',
-        mode: 'no-cors',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ action: 'delete', id: String(id) })
       });
@@ -487,7 +497,7 @@ export default function OptionsStrategyBuilder() {
       setSavedSimulations(prev => prev.filter(s => s.id !== id));
       addToast("Estratégia excluída.", 'success');
     } catch (error) {
-      addToast("Erro ao excluir.", 'error');
+      addToast("Erro ao eliminar.", 'error');
     }
   };
 
@@ -498,14 +508,14 @@ export default function OptionsStrategyBuilder() {
       if (!response.ok) throw new Error(`Erro HTTP: ${response.status}`);
       const text = await response.text();
       let data;
-      try { data = JSON.parse(text); } catch (e) { throw new Error("Dados inválidos recebidos."); }
+      try { data = JSON.parse(text); } catch (e) { throw new Error("Dados inválidos recebidos do servidor."); }
       if (!Array.isArray(data)) throw new Error("Formato inválido.");
 
       setSavedSimulations(data);
       setShowLoadModal(true);
       addToast("Histórico carregado", 'success');
     } catch (error: any) {
-      addToast(`Erro ao carregar: ${error.message}`, 'error');
+      addToast(`Erro ao carregar ficheiro: ${error.message}`, 'error');
     }
   };
 
@@ -516,10 +526,9 @@ export default function OptionsStrategyBuilder() {
     setLegs(sim.legs);
     setEditingId(sim.id);
     setShowLoadModal(false);
-    addToast(`Editando: ${sim.name}`, 'info');
+    addToast(`A editar: ${sim.name}`, 'info');
   };
 
-  // --- CALCS ---
   const chartRange = useMemo(() => {
     const range: number[] = [];
     const lower = spotPrice * 0.7;
@@ -535,12 +544,12 @@ export default function OptionsStrategyBuilder() {
   const currentStrategyInfo = useMemo(() => STRATEGIES.find(s => s.name === strategyName), [strategyName]);
 
   const riskAnalysis = useMemo(() => {
-    const hasShortLegs = legs.some(l => l.action === 'Sell');
+    const hasShortLegs = legs.some(l => l.action === 'Sell' && l.type !== 'Stock');
     const isUndefinedRisk = typeof calculatedMetrics.maxLoss === 'string';
     let marginType = "Isento", marginValue = "R$ 0,00", riskProfile = "Risco Definido", alertLevel: 'low' | 'medium' | 'high' = 'low';
 
-    if (!hasShortLegs) { marginType = "Isento (Prêmio)"; riskProfile = "Limitado ao Pago"; alertLevel = 'low'; }
-    else if (isUndefinedRisk) { marginType = "Chamada de Margem B3"; marginValue = "Alta / Garantia"; riskProfile = "Risco Ilimitado"; alertLevel = 'high'; }
+    if (!hasShortLegs) { marginType = "Isento (Prémio)"; riskProfile = "Limitado ao Pago"; alertLevel = 'low'; }
+    else if (isUndefinedRisk) { marginType = "Chamada de Margem B3"; marginValue = "Elevada / Garantia"; riskProfile = "Risco Ilimitado"; alertLevel = 'high'; }
     else { marginType = "Travada (Max Loss)"; if (typeof calculatedMetrics.maxLoss === 'number') marginValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Math.abs(calculatedMetrics.maxLoss)); riskProfile = "Travado (Spread)"; alertLevel = 'medium'; }
     return { marginType, marginValue, riskProfile, alertLevel };
   }, [legs, calculatedMetrics]);
@@ -572,7 +581,6 @@ export default function OptionsStrategyBuilder() {
         </div>
       </header>
 
-      {/* ÁREA DE CAPTURA PARA RELATÓRIO (ID importante) */}
       <div id="report-container" ref={reportRef} className="grid grid-cols-1 lg:grid-cols-3 gap-6 p-4 rounded-xl relative">
         
         {/* LEFT COLUMN */}
@@ -600,7 +608,6 @@ export default function OptionsStrategyBuilder() {
                 <Area type="monotone" dataKey="value" stroke="#519CFF" strokeWidth={2} fill="url(#colorProfit)" />
               </AreaChart>
             </ResponsiveContainer>
-            {/* Oculta slider no print */}
             <div className="px-6 py-4 bg-black/20 border-t border-white/5" data-html2canvas-ignore="true">
               <div className="flex justify-between items-center text-xs text-blue-200/50 mb-2"><span>-30%</span><span className="text-white font-bold">Ajuste o Preço para Simular Cenários (What-if)</span><span>+30%</span></div>
               <input type="range" min={spotPrice * 0.7} max={spotPrice * 1.3} step={(spotPrice * 0.6) / 200} value={simulatedSpot} onChange={(e) => setSimulatedSpot(parseFloat(e.target.value))} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-all" />
@@ -612,8 +619,8 @@ export default function OptionsStrategyBuilder() {
             <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5"><h3 className="text-sm font-semibold text-blue-200 uppercase tracking-wide flex items-center gap-2"><LayoutGrid size={16} /> Pernas da Estratégia</h3><button onClick={addLeg} className="text-xs bg-blue-500/20 hover:bg-blue-500/40 text-blue-300 px-2 py-1 rounded border border-blue-500/30 transition-colors flex items-center gap-1" data-html2canvas-ignore="true"><Plus size={14} /> Adicionar Perna</button></div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
-                <thead className="text-xs text-blue-200/50 uppercase bg-black/20"><tr><th className="px-4 py-3">Ação</th><th className="px-4 py-3">Tipo</th><th className="px-4 py-3">Strike ($)</th><th className="px-4 py-3">Qtd</th><th className="px-4 py-3">Prêmio ($)</th><th className="px-4 py-3" data-html2canvas-ignore="true"></th></tr></thead>
-                <tbody className="divide-y divide-white/5">{legs.map((leg) => (<tr key={leg.id} className="hover:bg-white/5 transition-colors"><td className="px-4 py-2"><select value={leg.action} onChange={(e) => updateLeg(leg.id, 'action', e.target.value)} className={`bg-transparent font-bold cursor-pointer outline-none ${leg.action === 'Buy' ? 'text-green-400' : 'text-red-400'}`}><option value="Buy" className="bg-slate-800 text-green-400">Compra</option><option value="Sell" className="bg-slate-800 text-red-400">Venda</option></select></td><td className="px-4 py-2"><select value={leg.type} onChange={(e) => updateLeg(leg.id, 'type', e.target.value)} className="bg-transparent text-white cursor-pointer outline-none"><option value="Call" className="bg-slate-800">Call</option><option value="Put" className="bg-slate-800">Put</option></select></td><td className="px-4 py-2"><input type="number" value={leg.strike} onChange={(e) => updateLeg(leg.id, 'strike', parseFloat(e.target.value))} className="bg-black/20 w-24 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" value={leg.quantity} onChange={(e) => updateLeg(leg.id, 'quantity', parseFloat(e.target.value))} className="bg-black/20 w-16 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" step="0.01" value={leg.price} onChange={(e) => updateLeg(leg.id, 'price', parseFloat(e.target.value))} className="bg-black/20 w-20 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2 text-right" data-html2canvas-ignore="true"><button onClick={() => removeLeg(leg.id)} className="text-white/20 hover:text-red-400 transition-colors"><Trash2 size={16} /></button></td></tr>))}</tbody>
+                <thead className="text-xs text-blue-200/50 uppercase bg-black/20"><tr><th className="px-4 py-3">Ação</th><th className="px-4 py-3">Tipo</th><th className="px-4 py-3">Strike ($)</th><th className="px-4 py-3">Qtd</th><th className="px-4 py-3">Prémio ($)</th><th className="px-4 py-3" data-html2canvas-ignore="true"></th></tr></thead>
+                <tbody className="divide-y divide-white/5">{legs.map((leg) => (<tr key={leg.id} className="hover:bg-white/5 transition-colors"><td className="px-4 py-2"><select value={leg.action} onChange={(e) => updateLeg(leg.id, 'action', e.target.value)} className={`bg-transparent font-bold cursor-pointer outline-none ${leg.action === 'Buy' ? 'text-green-400' : 'text-red-400'}`}><option value="Buy" className="bg-slate-800 text-green-400">Compra</option><option value="Sell" className="bg-slate-800 text-red-400">Venda</option></select></td><td className="px-4 py-2"><select value={leg.type} onChange={(e) => updateLeg(leg.id, 'type', e.target.value)} className="bg-transparent text-white cursor-pointer outline-none"><option value="Call" className="bg-slate-800">Call</option><option value="Put" className="bg-slate-800">Put</option><option value="Stock" className="bg-slate-800">Ação</option></select></td><td className="px-4 py-2"><input type="number" value={leg.type === 'Stock' ? '-' : leg.strike} disabled={leg.type === 'Stock'} onChange={(e) => updateLeg(leg.id, 'strike', parseFloat(e.target.value))} className="bg-black/20 w-24 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none disabled:opacity-50"/></td><td className="px-4 py-2"><input type="number" value={leg.quantity} onChange={(e) => updateLeg(leg.id, 'quantity', parseFloat(e.target.value))} className="bg-black/20 w-16 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" step="0.01" value={leg.price} onChange={(e) => updateLeg(leg.id, 'price', parseFloat(e.target.value))} className="bg-black/20 w-20 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2 text-right" data-html2canvas-ignore="true"><button onClick={() => removeLeg(leg.id)} className="text-white/20 hover:text-red-400 transition-colors"><Trash2 size={16} /></button></td></tr>))}</tbody>
               </table>
             </div>
             {legs.length === 0 && <div className="p-8 text-center text-white/30 italic">Nenhuma perna definida.</div>}
@@ -639,7 +646,7 @@ export default function OptionsStrategyBuilder() {
 
           <Card className="p-5 flex-1 flex flex-col justify-end min-h-[140px] relative overflow-hidden">
              <Shield className={`absolute -right-6 -bottom-6 w-32 h-32 rotate-12 transition-colors duration-500 ${riskAnalysis.alertLevel === 'high' ? 'text-red-500/10' : 'text-emerald-500/10'}`} />
-             <div className="relative z-10 flex flex-col gap-3"><div className="flex justify-between items-start"><h4 className="text-sm font-bold text-white flex items-center gap-2">Controle de Risco & Garantias</h4>{riskAnalysis.alertLevel === 'high' && <AlertTriangle className="text-red-400 animate-pulse" size={18} />}{riskAnalysis.alertLevel === 'medium' && <Lock className="text-yellow-400" size={18} />}{riskAnalysis.alertLevel === 'low' && <Unlock className="text-emerald-400" size={18} />}</div><div className="space-y-2"><div className="flex justify-between items-center text-xs border-b border-white/5 pb-2"><span className="text-white/50">Perfil de Risco</span><span className={`font-bold ${riskAnalysis.alertLevel === 'high' ? 'text-red-400' : 'text-white'}`}>{riskAnalysis.riskProfile}</span></div><div className="flex justify-between items-center text-xs pt-1"><span className="text-white/50">Chamada de Margem (Estimada)</span><div className="text-right"><div className={`font-bold ${riskAnalysis.alertLevel === 'low' ? 'text-emerald-400' : 'text-yellow-400'}`}>{riskAnalysis.marginValue}</div><div className="text-[10px] text-white/30">{riskAnalysis.marginType}</div></div></div></div></div>
+             <div className="relative z-10 flex flex-col gap-3"><div className="flex justify-between items-start"><h4 className="text-sm font-bold text-white flex items-center gap-2">Controlo de Risco & Garantias</h4>{riskAnalysis.alertLevel === 'high' && <AlertTriangle className="text-red-400 animate-pulse" size={18} />}{riskAnalysis.alertLevel === 'medium' && <Lock className="text-yellow-400" size={18} />}{riskAnalysis.alertLevel === 'low' && <Unlock className="text-emerald-400" size={18} />}</div><div className="space-y-2"><div className="flex justify-between items-center text-xs border-b border-white/5 pb-2"><span className="text-white/50">Perfil de Risco</span><span className={`font-bold ${riskAnalysis.alertLevel === 'high' ? 'text-red-400' : 'text-white'}`}>{riskAnalysis.riskProfile}</span></div><div className="flex justify-between items-center text-xs pt-1"><span className="text-white/50">Chamada de Margem (Estimada)</span><div className="text-right"><div className={`font-bold ${riskAnalysis.alertLevel === 'low' ? 'text-emerald-400' : 'text-yellow-400'}`}>{riskAnalysis.marginValue}</div><div className="text-[10px] text-white/30">{riskAnalysis.marginType}</div></div></div></div></div>
           </Card>
         </div>
       </div>
@@ -648,7 +655,7 @@ export default function OptionsStrategyBuilder() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <Card className="w-full max-w-2xl max-h-[80vh] flex flex-col bg-[#111C2C]">
             <div className="p-6 border-b border-white/10 flex justify-between items-center">
-              <h2 className="text-xl font-bold text-white">Simulações Salvas</h2>
+              <h2 className="text-xl font-bold text-white">Simulações Guardadas</h2>
               <button onClick={() => setShowLoadModal(false)} className="text-white/50 hover:text-white"><Plus className="rotate-45" /></button>
             </div>
             <div className="overflow-y-auto p-6 space-y-3">
@@ -690,4 +697,3 @@ export default function OptionsStrategyBuilder() {
     </div>
   );
 }
-
