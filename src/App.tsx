@@ -3,26 +3,82 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine 
 } from 'recharts';
 import { 
-  Plus, Trash2, Save, Download, Activity, DollarSign, Shield, Zap, LayoutGrid, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, AlertTriangle, Edit2, RefreshCw, FileText, TrendingUp, TrendingDown, Search, ArrowRightLeft, ChevronDown
+  Plus, Trash2, Activity, DollarSign, Shield, Zap, LayoutGrid, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, Search, ChevronDown, RefreshCw
 } from 'lucide-react';
 
 /**
- * CONFIGURAÇÃO E BACKEND
+ * DEFINIÇÃO DE TIPOS E INTERFACES (RIGOR DE AUDITORIA)
  */
 const GAS_URL = "https://script.google.com/macros/s/AKfycbx7kyTKXaQtVYg0WzgzMow9s3elbyDq4Su6TSirn3l3Ppn3_T4xIODahwC9Rt9zWpNJtA/exec"; 
 
+type OptionType = 'Call' | 'Put' | 'Stock';
+type ActionType = 'Buy' | 'Sell';
+
+interface Leg {
+  id: string;
+  type: OptionType;
+  action: ActionType;
+  strike: number;
+  quantity: number;
+  price: number;
+  delta?: number;
+  gamma?: number;
+  theta?: number;
+  vega?: number;
+}
+
+interface StrategyTemplate {
+  name: string;
+  category: 'Bullish' | 'Bearish' | 'Volatility' | 'Income' | 'Hedge';
+  description: string;
+  details: {
+    thesis: string;
+    mechanics: string;
+    idealScenario: string;
+    greeks: string;
+  };
+  setup: (spot: number) => Leg[];
+}
+
+interface MarketOption {
+  ticker: string;
+  type: OptionType;
+  strike: number;
+  expirationDate: string;
+  daysToMaturity: number;
+  bid: number;
+  ask: number;
+  last: number;
+  impliedVolatility: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+}
+
+interface MarketDataResponse {
+  baseAsset: string;
+  spotPrice: number;
+  timestamp: string;
+  chain: MarketOption[];
+  diagnostics?: string;
+}
+
 /**
- * MOTOR MATEMÁTICO: BLACK-SCHOLES (GREGAS)
+ * MOTOR MATEMÁTICO: BLACK-SCHOLES (TIPADO)
  */
-const normPDF = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
-const normCDF = (x) => {
+const normPDF = (x: number): number => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+const normCDF = (x: number): number => {
   const t = 1 / (1 + 0.2316419 * Math.abs(x));
   const d = 0.3989423 * Math.exp(-x * x / 2);
   const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
   return x > 0 ? 1 - p : p;
 };
 
-const calculateGreeks = (S, K, daysToMaturity, sigma, type) => {
+const calculateGreeks = (S: number, K: number, daysToMaturity: number, sigma: number, type: OptionType) => {
+  if (type === 'Stock') return { delta: 1, gamma: 0, theta: 0, vega: 0 };
+  
   const r = 0.1125; 
   const T = Math.max(daysToMaturity, 1) / 365.0;
   const d1 = (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T));
@@ -31,6 +87,7 @@ const calculateGreeks = (S, K, daysToMaturity, sigma, type) => {
   let delta, gamma, theta, vega;
   gamma = normPDF(d1) / (S * sigma * Math.sqrt(T));
   vega = S * normPDF(d1) * Math.sqrt(T) / 100;
+  
   if (type === 'Call') {
     delta = normCDF(d1);
     theta = (- (S * sigma * normPDF(d1)) / (2 * Math.sqrt(T)) - r * K * Math.exp(-r * T) * normCDF(d2)) / 365;
@@ -44,10 +101,10 @@ const calculateGreeks = (S, K, daysToMaturity, sigma, type) => {
 const generateUUID = () => Math.random().toString(36).substr(2, 9);
 
 /**
- * CATÁLOGO COMPLETO: 45 ESTRATÉGIAS DE OPÇÕES
+ * CATÁLOGO COMPLETO: 45 ESTRATÉGIAS
  */
-const STRATEGIES = [
-  // BULLISH (1-9)
+const STRATEGIES: StrategyTemplate[] = [
+  // BULLISH
   { name: "1. Long Call", category: "Bullish", description: "Compra de Call a seco.", details: { thesis: "Alta direcional forte.", mechanics: "Compra de direito de compra.", idealScenario: "Explosão de preço.", greeks: "Delta+, Gamma+, Theta-, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 2.5 }] },
   { name: "2. Short Put (Naked)", category: "Bullish", description: "Venda de Put a seco.", details: { thesis: "Neutro a levemente altista.", mechanics: "Venda de obrigação de compra.", idealScenario: "Preço acima do strike.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 2.0 }] },
   { name: "3. Bull Call Spread", category: "Bullish", description: "Trava de Alta com Calls.", details: { thesis: "Alta moderada.", mechanics: "Compra Call ATM, Vende Call OTM.", idealScenario: "Sobe até o strike vendido.", greeks: "Delta+, Theta misto" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }] },
@@ -58,7 +115,7 @@ const STRATEGIES = [
   { name: "8. Bull Call Ladder", category: "Bullish", description: "Ratio estendido.", details: { thesis: "Alta moderada com crédito.", mechanics: "Bull Spread + Venda Extra.", idealScenario: "Alta gradual.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
   { name: "9. Synthetic Long", category: "Bullish", description: "Simula compra de ação.", details: { thesis: "Réplica do ativo sem capital.", mechanics: "Compra Call, Vende Put ATM.", idealScenario: "Qualquer alta.", greeks: "Delta 1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }] },
 
-  // BEARISH (10-18)
+  // BEARISH
   { name: "10. Long Put", category: "Bearish", description: "Compra de Put a seco.", details: { thesis: "Queda direcional.", mechanics: "Direito de venda.", idealScenario: "Queda brusca.", greeks: "Delta-, Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 2.5 }] },
   { name: "11. Short Call (Naked)", category: "Bearish", description: "Venda de Call a seco.", details: { thesis: "Neutro a baixista.", mechanics: "Vende direito de compra.", idealScenario: "Preço não sobe.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }] },
   { name: "12. Bear Put Spread", category: "Bearish", description: "Trava de Baixa com Puts.", details: { thesis: "Queda moderada.", mechanics: "Compra Put ATM, Vende OTM.", idealScenario: "Cai até strike vendido.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 2.0 }] },
@@ -69,7 +126,7 @@ const STRATEGIES = [
   { name: "17. Synthetic Short", category: "Bearish", description: "Simula venda a descoberto.", details: { thesis: "Queda linear sem aluguer.", mechanics: "Vende Call, Compra Put ATM.", idealScenario: "Qualquer queda.", greeks: "Delta -1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }] },
   { name: "18. Synthetic Put", category: "Bearish", description: "Put com Ação.", details: { thesis: "Replicação de Put.", mechanics: "Short Stock + Long Call.", idealScenario: "Queda forte.", greeks: "Delta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Stock', action: 'Sell', strike: spot, quantity: 100, price: spot }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 2.5 }] },
 
-  // VOLATILITY (19-27)
+  // VOLATILITY
   { name: "19. Long Straddle", category: "Volatility", description: "Compra Call e Put ATM.", details: { thesis: "Explosão de preço.", mechanics: "Compra Volatilidade pura.", idealScenario: "Movimento forte.", greeks: "Gamma++, Vega++, Theta--" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }] },
   { name: "20. Long Strangle", category: "Volatility", description: "Compra Put e Call OTM.", details: { thesis: "Explosão (menor custo).", mechanics: "Opções OTM.", idealScenario: "Movimento muito forte.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 2.5 }] },
   { name: "21. Strip", category: "Volatility", description: "Straddle Bearish.", details: { thesis: "Volatilidade viés baixa.", mechanics: "2 Puts + 1 Call ATM.", idealScenario: "Queda forte.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 200, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }] },
@@ -80,7 +137,7 @@ const STRATEGIES = [
   { name: "26. Short Butterfly (P)", category: "Volatility", description: "Versão com Puts.", details: { thesis: "Explosão de preço.", mechanics: "Com Puts.", idealScenario: "Longe do miolo.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 200, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 1.5 }] },
   { name: "27. Double Ratio (Vol)", category: "Volatility", description: "Backspread duplo.", details: { thesis: "Grande movimento.", mechanics: "Vende ATM, compra OTM duplo.", idealScenario: "Explosão lateral.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 200, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 200, price: 1.5 }] },
 
-  // INCOME (28-38)
+  // INCOME
   { name: "28. Short Straddle", category: "Income", description: "Venda ATM.", details: { thesis: "Mercado parado.", mechanics: "Venda de vol ATM.", idealScenario: "Preço estático.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }] },
   { name: "29. Short Strangle", category: "Income", description: "Venda OTM.", details: { thesis: "Mercado em range.", mechanics: "Venda de vol OTM.", idealScenario: "Entre strikes.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 2.0 }] },
   { name: "30. Iron Condor", category: "Income", description: "Strangle travado.", details: { thesis: "Lateralização segura.", mechanics: "Bull Put + Bear Call.", idealScenario: "No corpo do condor.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
@@ -93,7 +150,7 @@ const STRATEGIES = [
   { name: "37. Christmas Tree (P)", category: "Income", description: "Versão com Puts.", details: { thesis: "Queda lenta e limitada.", mechanics: "Com Puts.", idealScenario: "No strike vendido.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 300, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 200, price: 0.5 }] },
   { name: "38. Condor (Call)", category: "Income", description: "Corpo largo.", details: { thesis: "Lateralidade ampla.", mechanics: "Borboleta com miolo aberto.", idealScenario: "Entre strikes vendidos.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 9.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 0.5 }] },
 
-  // HEDGE (39-45)
+  // HEDGE
   { name: "39. Jade Lizard", category: "Hedge", description: "Put + Bear Call.", details: { thesis: "Neutro/Alta sem risco alta.", mechanics: "Soma de crédito.", idealScenario: "Lateral/Alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
   { name: "40. Twisted Sister", category: "Hedge", description: "Inverso Jade.", details: { thesis: "Neutro/Baixa.", mechanics: "Venda Call + Bull Put.", idealScenario: "Lateral/Queda.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 1.0 }] },
   { name: "41. Seagull (Bull)", category: "Hedge", description: "Bull Spread financiado.", details: { thesis: "Alta financiada.", mechanics: "Call Spread + Put Short.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 3.0 }] },
@@ -103,18 +160,18 @@ const STRATEGIES = [
   { name: "45. Synthetic Collar", category: "Hedge", description: "Collar sintético.", details: { thesis: "Proteção total.", mechanics: "Stock Sintético + Collar.", idealScenario: "Alta moderada.", greeks: "Delta limitado" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 1.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 1.0 }] }
 ];
 
-const CategoryTranslation = { 'Bullish': 'Alta', 'Bearish': 'Baixa', 'Volatility': 'Volatilidade', 'Income': 'Renda', 'Hedge': 'Proteção' };
+const CategoryTranslation: Record<string, string> = { 'Bullish': 'Alta', 'Bearish': 'Baixa', 'Volatility': 'Volatilidade', 'Income': 'Renda', 'Hedge': 'Proteção' };
 
 /**
  * COMPONENTES UI (HELPERS)
  */
-const Card = ({ children, className = "" }) => (
+const Card: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = "" }) => (
   <div className={`bg-[#9CB0CE]/20 backdrop-blur-md border border-[#E5F9FF]/10 shadow-lg rounded-xl overflow-hidden ${className}`}>
     {children}
   </div>
 );
 
-const ToastContainer = ({ toasts, removeToast }) => (
+const ToastContainer: React.FC<{ toasts: { id: number; message: string; type: string }[]; removeToast: (id: number) => void }> = ({ toasts, removeToast }) => (
   <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none">
     {toasts.map(t => (
       <div key={t.id} className={`pointer-events-auto flex items-center gap-3 p-4 rounded-lg shadow-2xl border backdrop-blur-md transition-all duration-300 ${t.type === 'success' ? 'bg-emerald-900/80 border-emerald-500/30 text-emerald-100' : t.type === 'error' ? 'bg-red-900/80 border-red-500/30 text-red-100' : 'bg-blue-900/80 border-blue-500/30 text-blue-100'}`}>
@@ -129,14 +186,14 @@ const ToastContainer = ({ toasts, removeToast }) => (
 /**
  * ENGINE MATEMÁTICA PAYOFF & CONSOLIDAÇÃO
  */
-const getOptionValueAtExpiry = (type, strike, spot) => {
+const getOptionValueAtExpiry = (type: OptionType, strike: number, spot: number): number => {
   if (type === 'Call') return Math.max(0, spot - strike);
   if (type === 'Put') return Math.max(0, strike - spot);
   if (type === 'Stock') return spot;
   return 0;
 };
 
-const calculatePayoff = (legs, spotRange) => {
+const calculatePayoff = (legs: Leg[], spotRange: number[]) => {
   return spotRange.map(spot => {
     let totalPnl = 0;
     legs.forEach(leg => {
@@ -153,18 +210,18 @@ const calculatePayoff = (legs, spotRange) => {
  * MAIN APP COMPONENT
  */
 export default function OptionsStrategyBuilder() {
-  const [spotPrice, setSpotPrice] = useState(100);
-  const [simulatedSpot, setSimulatedSpot] = useState(100); 
-  const [legs, setLegs] = useState([]);
-  const [toasts, setToasts] = useState([]);
-  const [strategyName, setStrategyName] = useState("Custom");
+  const [spotPrice, setSpotPrice] = useState<number>(100);
+  const [simulatedSpot, setSimulatedSpot] = useState<number>(100); 
+  const [legs, setLegs] = useState<Leg[]>([]);
+  const [toasts, setToasts] = useState<{ id: number; message: string; type: string }[]>([]);
+  const [strategyName, setStrategyName] = useState<string>("Custom");
   
-  const [tickerQuery, setTickerQuery] = useState("PETR4");
-  const [isFetchingMarket, setIsFetchingMarket] = useState(false);
-  const [marketData, setMarketData] = useState(null);
-  const [selectedExpiry, setSelectedExpiration] = useState("");
+  const [tickerQuery, setTickerQuery] = useState<string>("PETR4");
+  const [isFetchingMarket, setIsFetchingMarket] = useState<boolean>(false);
+  const [marketData, setMarketData] = useState<MarketDataResponse | null>(null);
+  const [selectedExpiry, setSelectedExpiration] = useState<string>("");
 
-  const addToast = (msg, type = 'info') => {
+  const addToast = (msg: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = Date.now();
     setToasts(prev => [...prev, { id, message: msg, type }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000); 
@@ -181,9 +238,10 @@ export default function OptionsStrategyBuilder() {
       const response = await fetch(`${GAS_URL}?ticker=${tickerQuery.toUpperCase()}`);
       const json = await response.json();
       if (json.status === 'success' && json.data.chain.length > 0) {
-        const enrichedChain = json.data.chain.map(opt => ({
-          ...opt, ...calculateGreeks(json.data.spotPrice, opt.strike, opt.daysToMaturity, opt.impliedVolatility, opt.type)
-        }));
+        const enrichedChain: MarketOption[] = json.data.chain.map((opt: MarketOption) => {
+          const greeks = calculateGreeks(json.data.spotPrice, opt.strike, opt.daysToMaturity, opt.impliedVolatility, opt.type);
+          return { ...opt, ...greeks };
+        });
         setMarketData({ ...json.data, chain: enrichedChain });
         setSpotPrice(json.data.spotPrice);
         const dates = [...new Set(enrichedChain.map(opt => opt.expirationDate))];
@@ -193,34 +251,50 @@ export default function OptionsStrategyBuilder() {
     } catch (e) { addToast("Erro ao conectar ao Gateway.", 'error'); } finally { setIsFetchingMarket(false); }
   };
 
-  const handleStrategyTemplateChange = (e) => {
+  const handleStrategyTemplateChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const selected = STRATEGIES.find(s => s.name === e.target.value);
     if (selected) {
       setStrategyName(selected.name);
       const newLegs = selected.setup(spotPrice).map(leg => {
         const match = marketData?.chain.find(o => Math.abs(o.strike - leg.strike) < 0.2 && o.type === leg.type);
-        return { ...leg, delta: match?.delta, gamma: match?.gamma, theta: match?.theta, vega: match?.vega };
+        return { 
+          ...leg, 
+          delta: match?.delta || 0, 
+          gamma: match?.gamma || 0, 
+          theta: match?.theta || 0, 
+          vega: match?.vega || 0 
+        };
       });
       setLegs(newLegs);
       addToast(`Template ${selected.name} aplicado.`, 'success');
     } else { setStrategyName("Custom"); }
   };
 
-  const addLegFromMarket = (option, action) => {
+  const addLegFromMarket = (option: MarketOption | undefined, action: ActionType) => {
     if (!option) return;
     setLegs([...legs, { 
-      id: generateUUID(), type: option.type, action, strike: option.strike, quantity: 100, 
-      price: action === 'Buy' ? option.ask : option.bid, ...option
+      id: generateUUID(), 
+      type: option.type, 
+      action, 
+      strike: option.strike, 
+      quantity: 100, 
+      price: action === 'Buy' ? option.ask : option.bid,
+      delta: option.delta,
+      gamma: option.gamma,
+      theta: option.theta,
+      vega: option.vega
     }]);
   };
 
-  const updateLeg = (id, field, value) => {
+  const updateLeg = (id: string, field: keyof Leg, value: any) => {
     setLegs(prev => prev.map(leg => leg.id === id ? { ...leg, [field]: value } : leg));
   };
 
+  const removeLeg = (id: string) => setLegs(legs.filter(l => l.id !== id));
+
   // CALCULATED METRICS
   const payoffData = useMemo(() => {
-    const range = [];
+    const range: number[] = [];
     const lower = spotPrice * 0.7, upper = spotPrice * 1.3, step = (upper - lower) / 100;
     for (let p = lower; p <= upper; p += step) range.push(p);
     return calculatePayoff(legs, range);
@@ -240,9 +314,9 @@ export default function OptionsStrategyBuilder() {
       if (l.vega) tV += l.vega * l.quantity * m;
     });
     const vals = payoffData.map(p => p.value);
-    let mP = Math.max(...vals, pZero), mL = Math.min(...vals, pZero);
+    let mP: number | string = Math.max(...vals, pZero), mL: number | string = Math.min(...vals, pZero);
     if (dInf > 0) mP = "Ilimitado"; if (dInf < 0) mL = "Ilimitado";
-    const be = [];
+    const be: number[] = [];
     for (let i = 1; i < payoffData.length; i++) {
       if (payoffData[i-1].value * payoffData[i].value <= 0 && payoffData[i-1].value !== payoffData[i].value) {
         be.push(parseFloat((payoffData[i-1].price - payoffData[i-1].value * (payoffData[i].price - payoffData[i-1].price) / (payoffData[i].value - payoffData[i-1].value)).toFixed(2)));
