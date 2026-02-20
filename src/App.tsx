@@ -1,699 +1,433 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-// html2canvas carregado dinamicamente para evitar erros de build
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine 
 } from 'recharts';
 import { 
-  Plus, Trash2, Save, Download, Activity, DollarSign, Shield, Zap, LayoutGrid, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, AlertTriangle, Edit2, RefreshCw, FileText, TrendingUp, TrendingDown
+  Plus, Trash2, Save, Download, Activity, DollarSign, Shield, Zap, LayoutGrid, Check, X, AlertCircle, Info, BookOpen, Lock, Unlock, AlertTriangle, Edit2, RefreshCw, FileText, TrendingUp, TrendingDown, Search, ArrowRightLeft, ChevronDown
 } from 'lucide-react';
 
 /**
- * CONFIGURAÇÃO E TYPES
+ * CONFIGURAÇÃO E BACKEND
  */
-
-// URL do Google Apps Script (Backend)
-const GAS_URL = "https://script.google.com/macros/s/AKfycbzqSFOMVRsyxcAQi8MOu0QXonTr96IgiT0d1qASaNi2_ShmaBJlWkIxfenML2GbmB0k/exec"; 
-
-type OptionType = 'Call' | 'Put' | 'Stock';
-type ActionType = 'Buy' | 'Sell';
-
-interface Leg {
-  id: string;
-  type: OptionType;
-  action: ActionType;
-  strike: number;
-  quantity: number;
-  price: number; 
-  iv?: number;
-}
-
-interface StrategyTemplate {
-  name: string;
-  category: 'Bullish' | 'Bearish' | 'Volatility' | 'Income' | 'Hedge';
-  description: string;
-  details: {
-    thesis: string;
-    mechanics: string;
-    idealScenario: string;
-    greeks: string;
-  };
-  setup: (spot: number) => Leg[];
-}
-
-interface PayoffPoint {
-  price: number;
-  value: number;
-}
-
-interface Metrics {
-  cost: number;
-  maxProfit: number | string;
-  maxLoss: number | string;
-  breakevens: number[];
-}
-
-interface Toast {
-  id: number;
-  message: string;
-  type: 'success' | 'error' | 'info';
-}
+const GAS_URL = "https://script.google.com/macros/s/AKfycbx7kyTKXaQtVYg0WzgzMow9s3elbyDq4Su6TSirn3l3Ppn3_T4xIODahwC9Rt9zWpNJtA/exec"; 
 
 /**
- * ENGINE MATEMÁTICA
+ * MOTOR MATEMÁTICO: BLACK-SCHOLES (GREGAS)
  */
+const normPDF = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+const normCDF = (x) => {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989423 * Math.exp(-x * x / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return x > 0 ? 1 - p : p;
+};
+
+const calculateGreeks = (S, K, daysToMaturity, sigma, type) => {
+  const r = 0.1125; 
+  const T = Math.max(daysToMaturity, 1) / 365.0;
+  const d1 = (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T));
+  const d2 = d1 - sigma * Math.sqrt(T);
+
+  let delta, gamma, theta, vega;
+  gamma = normPDF(d1) / (S * sigma * Math.sqrt(T));
+  vega = S * normPDF(d1) * Math.sqrt(T) / 100;
+  if (type === 'Call') {
+    delta = normCDF(d1);
+    theta = (- (S * sigma * normPDF(d1)) / (2 * Math.sqrt(T)) - r * K * Math.exp(-r * T) * normCDF(d2)) / 365;
+  } else {
+    delta = normCDF(d1) - 1;
+    theta = (- (S * sigma * normPDF(d1)) / (2 * Math.sqrt(T)) + r * K * Math.exp(-r * T) * normCDF(-d2)) / 365;
+  }
+  return { delta, gamma, theta, vega };
+};
 
 const generateUUID = () => Math.random().toString(36).substr(2, 9);
 
-const getOptionValueAtExpiry = (type: OptionType, strike: number, spot: number) => {
-  if (type === 'Call') return Math.max(0, spot - strike);
-  if (type === 'Put') return Math.max(0, strike - spot);
-  if (type === 'Stock') return spot; // A Ação simplesmente vale o spot
-  return 0;
-};
-
-const calculatePayoff = (legs: Leg[], spotRange: number[]) => {
-  return spotRange.map(spot => {
-    let totalPnl = 0;
-    legs.forEach(leg => {
-      const valueAtExpiry = getOptionValueAtExpiry(leg.type, leg.strike, spot);
-      const cost = leg.quantity * leg.price;
-      if (leg.action === 'Buy') {
-        totalPnl += (valueAtExpiry * leg.quantity) - cost;
-      } else {
-        totalPnl += cost - (valueAtExpiry * leg.quantity);
-      }
-    });
-    return { price: spot, value: totalPnl };
-  });
-};
-
-const calculateMetrics = (legs: Leg[], payoffData: PayoffPoint[]): Metrics => {
-  let cost = 0;
-  let deltaAtInfinity = 0; 
-  let payoffAtZero = 0;
-
-  legs.forEach(leg => {
-    const legCost = leg.quantity * leg.price;
-    const isBuy = leg.action === 'Buy';
-    
-    // Custo
-    if (isBuy) cost += legCost;
-    else cost -= legCost;
-
-    // Comportamento no Infinito (Apenas Calls e Stock exercem influência linear direcional no infinito)
-    if (leg.type === 'Call' || leg.type === 'Stock') {
-      deltaAtInfinity += isBuy ? leg.quantity : -leg.quantity;
-    }
-
-    // Comportamento no Zero
-    const valueZero = getOptionValueAtExpiry(leg.type, leg.strike, 0);
-    const pnlZero = isBuy 
-      ? (valueZero * leg.quantity) - legCost 
-      : legCost - (valueZero * leg.quantity);
-    payoffAtZero += pnlZero;
-  });
-
-  const values = payoffData.map(p => p.value);
-  let maxProfit: number | string = Math.max(...values, payoffAtZero);
-  let maxLoss: number | string = Math.min(...values, payoffAtZero);
-
-  // Define infinitos baseado na exposição final das Calls e Stock
-  if (deltaAtInfinity > 0) maxProfit = "Ilimitado";
-  if (deltaAtInfinity < 0) maxLoss = "Ilimitado";
-
-  // Cálculo preciso de Breakevens via Interpolação Linear
-  const breakevens: number[] = [];
-  for (let i = 1; i < payoffData.length; i++) {
-    const prev = payoffData[i-1];
-    const curr = payoffData[i];
-    
-    if (prev.value * curr.value <= 0 && prev.value !== curr.value) {
-      // Fórmula da Interpolação: x = x1 - y1 * (x2 - x1) / (y2 - y1)
-      const exactZero = prev.price - prev.value * (curr.price - prev.price) / (curr.value - prev.value);
-      breakevens.push(parseFloat(exactZero.toFixed(2)));
-    }
-  }
-
-  const uniqueBreakevens = Array.from(new Set(breakevens));
-
-  return { cost, maxProfit, maxLoss, breakevens: uniqueBreakevens };
-};
-
 /**
- * STRATEGY FACTORY
+ * CATÁLOGO COMPLETO: 45 ESTRATÉGIAS DE OPÇÕES
  */
-const STRATEGIES: StrategyTemplate[] = [
-  // BULLISH
-  { name: "1. Long Call", category: "Bullish", description: "Compra de Call a seco.", details: { thesis: "Alta direcional forte.", mechanics: "Compra de direito de compra. Alavancagem simples.", idealScenario: "Explosão de preço no curto prazo.", greeks: "Delta+, Gamma+, Theta-, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 2.5 }] },
-  { name: "2. Short Put (Naked)", category: "Bullish", description: "Venda de Put a seco.", details: { thesis: "Neutro a levemente altista.", mechanics: "Venda de obrigação.", idealScenario: "Preço acima do strike.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
-  { name: "3. Bull Call Spread", category: "Bullish", description: "Trava de Alta com Calls.", details: { thesis: "Alta moderada.", mechanics: "Compra Call ATM, Vende Call OTM.", idealScenario: "Sobe até o strike vendido.", greeks: "Delta+, Theta misto" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }] },
-  { name: "4. Bull Put Spread", category: "Bullish", description: "Trava de Alta com Puts.", details: { thesis: "Alta moderada/lateral.", mechanics: "Vende Put ATM, Compra Put OTM.", idealScenario: "Acima do strike vendido.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
-  { name: "5. Call Ratio Spread", category: "Bullish", description: "Compra 1, Vende 2 Calls.", details: { thesis: "Alta leve.", mechanics: "Compra 1 Call, Vende 2 Calls OTM.", idealScenario: "No strike vendido.", greeks: "Delta variável" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
-  { name: "6. Risk Reversal", category: "Bullish", description: "Collar Zero Cost.", details: { thesis: "Alta com proteção.", mechanics: "Compra Call OTM, Vende Put OTM.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }] },
-  { name: "7. Call Backspread", category: "Bullish", description: "Vende 1, Compra 2 Calls.", details: { thesis: "Alta explosiva.", mechanics: "Vende 1 ATM, Compra 2 OTM.", idealScenario: "Movimento brusco.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
-  { name: "8. Bull Call Ladder", category: "Bullish", description: "Ratio estendido.", details: { thesis: "Alta moderada.", mechanics: "Estende lucro do Bull Spread.", idealScenario: "Alta gradual.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "9. Synthetic Long", category: "Bullish", description: "Simula ação.", details: { thesis: "Réplica do ativo.", mechanics: "Compra Call, Vende Put.", idealScenario: "Qualquer alta.", greeks: "Delta 1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }] },
-  // BEARISH
-  { name: "10. Long Put", category: "Bearish", description: "Compra de Put a seco.", details: { thesis: "Queda direcional.", mechanics: "Direito de venda.", idealScenario: "Queda brusca.", greeks: "Delta-, Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 2.5 }] },
-  { name: "11. Short Call (Naked)", category: "Bearish", description: "Venda de Call a seco.", details: { thesis: "Neutro a baixista.", mechanics: "Vende direito de compra.", idealScenario: "Preço não sobe.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }] },
-  { name: "12. Bear Put Spread", category: "Bearish", description: "Trava de Baixa com Puts.", details: { thesis: "Queda moderada.", mechanics: "Compra Put ATM, Vende OTM.", idealScenario: "Cai até strike vendido.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
-  { name: "13. Bear Call Spread", category: "Bearish", description: "Trava de Baixa com Calls.", details: { thesis: "Baixa moderada.", mechanics: "Vende Call ATM, Compra OTM.", idealScenario: "Abaixo do strike.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "14. Put Ratio Spread", category: "Bearish", description: "Compra 1, Vende 2 Puts.", details: { thesis: "Queda moderada.", mechanics: "Financia compra da Put.", idealScenario: "No strike vendido.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 2, price: 1.5 }] },
-  { name: "15. Put Backspread", category: "Bearish", description: "Vende 1, Compra 2 Puts.", details: { thesis: "Crash severo.", mechanics: "Vende cara, compra baratas.", idealScenario: "Queda catastrófica.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 2, price: 2.0 }] },
-  { name: "16. Bear Put Ladder", category: "Bearish", description: "Escada de Baixa.", details: { thesis: "Queda controlada.", mechanics: "Bear Put + Venda extra.", idealScenario: "Queda suave.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
-  { name: "17. Synthetic Short", category: "Bearish", description: "Venda a descoberto.", details: { thesis: "Queda linear.", mechanics: "Vende Call, Compra Put.", idealScenario: "Qualquer queda.", greeks: "Delta -1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "18. Synthetic Put", category: "Bearish", description: "Put com Ação.", details: { thesis: "Replicação de Put.", mechanics: "Short Stock + Long Call.", idealScenario: "Queda forte.", greeks: "Delta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  // VOLATILITY
-  { name: "19. Long Straddle", category: "Volatility", description: "Compra Call e Put ATM.", details: { thesis: "Explosão de preço.", mechanics: "Compra Volatilidade pura.", idealScenario: "Movimento forte.", greeks: "Gamma++, Vega++, Theta--" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "20. Long Strangle", category: "Volatility", description: "Compra Put e Call OTM.", details: { thesis: "Explosão (menor custo).", mechanics: "Opções OTM.", idealScenario: "Movimento muito forte.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.5 }] },
-  { name: "21. Strip", category: "Volatility", description: "Straddle Bearish.", details: { thesis: "Volatilidade com viés de baixa.", mechanics: "2 Puts + 1 Call.", idealScenario: "Queda forte.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 2, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "22. Strap", category: "Volatility", description: "Straddle Bullish.", details: { thesis: "Volatilidade com viés de alta.", mechanics: "2 Calls + 1 Put.", idealScenario: "Alta forte.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 2, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "23. Guts", category: "Volatility", description: "Compra ITM.", details: { thesis: "Volatilidade (Deep ITM).", mechanics: "Call/Put ITM.", idealScenario: "Movimento amplo.", greeks: "Delta neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
-  { name: "24. Reverse Iron Condor", category: "Volatility", description: "Aposta na explosão (Long).", details: { thesis: "Sair do intervalo.", mechanics: "Compra pontas internas, vende externas.", idealScenario: "Rompe barreiras fortemente.", greeks: "Vega+, Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "25. Short Butterfly (C)", category: "Volatility", description: "Explosão de preço.", details: { thesis: "Alta volatilidade.", mechanics: "Inverso da borboleta.", idealScenario: "Longe do centro.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  { name: "26. Short Butterfly (P)", category: "Volatility", description: "Versão com Puts.", details: { thesis: "Explosão de preço.", mechanics: "Com Puts.", idealScenario: "Longe do miolo.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  // INCOME
-  { name: "27. Double Ratio", category: "Income", description: "Vende 2 em ambos os lados.", details: { thesis: "Estabilidade ampla.", mechanics: "Call Ratio + Put Ratio.", idealScenario: "Preço parado entre strikes vendidos.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.02, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.98, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 2, price: 1.5 }] },
-  { name: "28. Short Straddle", category: "Income", description: "Venda ATM.", details: { thesis: "Mercado parado.", mechanics: "Venda de vol ATM.", idealScenario: "Preço estático.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }] },
-  { name: "29. Short Strangle", category: "Income", description: "Venda OTM.", details: { thesis: "Mercado em range.", mechanics: "Venda de vol OTM.", idealScenario: "Entre strikes.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 2.0 }] },
-  { name: "30. Iron Condor", category: "Income", description: "Strangle travado.", details: { thesis: "Lateralização segura.", mechanics: "Bull Put + Bear Call.", idealScenario: "No corpo do condor.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 },] },
-  { name: "31. Iron Butterfly", category: "Income", description: "Straddle travado.", details: { thesis: "Mercado parado seguro.", mechanics: "Vende ATM, protege OTM.", idealScenario: "Pin no central.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 2.0 },] },
-  { name: "32. Butterfly (Call)", category: "Income", description: "Borboleta clássica.", details: { thesis: "Alvo preciso.", mechanics: "Simetria 1-2-1.", idealScenario: "Exato no miolo.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 1.5 }] },
-  { name: "33. Butterfly (Put)", category: "Income", description: "Borboleta com Puts.", details: { thesis: "Alvo preciso.", mechanics: "1-2-1 com Puts.", idealScenario: "No miolo.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
-  { name: "34. Broken Wing (C)", category: "Income", description: "Borboleta assimétrica.", details: { thesis: "Viés de alta + renda.", mechanics: "Asa superior quebrada.", idealScenario: "Estável ou alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 0.5 }] },
-  { name: "35. Broken Wing (P)", category: "Income", description: "Borboleta assimétrica P.", details: { thesis: "Viés de baixa + renda.", mechanics: "Asa inferior quebrada.", idealScenario: "Estabilidade.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 0.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 2, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }] },
-  { name: "36. Christmas Tree (C)", category: "Income", description: "Borboleta 1-3-2.", details: { thesis: "Alta lenta e limitada.", mechanics: "Compra 1, pula strike, vende 3, compra 2.", idealScenario: "No strike vendido.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 3, price: 1.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 2, price: 0.5 }] },
-  { name: "37. Christmas Tree (P)", category: "Income", description: "Borboleta 1-3-2 de Puts.", details: { thesis: "Queda lenta e limitada.", mechanics: "Compra 1, pula strike, vende 3, compra 2.", idealScenario: "No strike vendido.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 3, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 2, price: 0.5 }] },
-  { name: "38. Condor", category: "Income", description: "Condor Call/Put.", details: { thesis: "Lateralização.", mechanics: "4 pernas mesmo tipo.", idealScenario: "Lateral.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 9.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 0.5 }] },
-  // HEDGE
-  { name: "39. Jade Lizard", category: "Hedge", description: "Put + Bear Call.", details: { thesis: "Neutro/Alta.", mechanics: "Coleta prêmio na Put.", idealScenario: "Lateral/Alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 1, price: 1.0 }] },
-  { name: "40. Twisted Sister", category: "Hedge", description: "Inverso Jade.", details: { thesis: "Neutro/Baixa.", mechanics: "Venda Call + Bull Put.", idealScenario: "Lateral/Queda.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.0 }] },
-  { name: "41. Seagull", category: "Hedge", description: "Bull Spread financiado.", details: { thesis: "Alta.", mechanics: "Call Spread + Put Short.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.00, quantity: 1, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 1, price: 3.0 }] },
-  { name: "42. Box Spread", category: "Hedge", description: "Arbitragem.", details: { thesis: "Renda Fixa.", mechanics: "Bull Call + Bear Put.", idealScenario: "Arbitragem.", greeks: "Neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 1, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 1, price: 2.0 }] },
-  { name: "43. Fence (Collar Options)", category: "Hedge", description: "Risk Reversal Protetivo.", details: { thesis: "Proteção de carteira.", mechanics: "Compra Put financiada por Venda de Call OTM.", idealScenario: "Mercado cai (protege carteira física).", greeks: "Delta-, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 1, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 1, price: 2.5 }] },
-  { name: "44. Ratio Call Write", category: "Hedge", description: "Covered Call 1x2.", details: { thesis: "Neutro.", mechanics: "Long Stock + 2 Calls Short.", idealScenario: "Alta moderada.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Stock', action: 'Buy', strike: spot, quantity: 1, price: spot }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 2, price: 2.0 }] },
-  { name: "45. Synthetic Collar", category: "Hedge", description: "Collar em ativo sintético.", details: { thesis: "Proteção total.", mechanics: "Cria a ação sinteticamente e aplica o Collar. Eficiência de capital.", idealScenario: "Alta moderada.", greeks: "Delta limitado" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 1, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 1, price: 1.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 1, price: 1.0 }] }
+const STRATEGIES = [
+  // BULLISH (1-9)
+  { name: "1. Long Call", category: "Bullish", description: "Compra de Call a seco.", details: { thesis: "Alta direcional forte.", mechanics: "Compra de direito de compra.", idealScenario: "Explosão de preço.", greeks: "Delta+, Gamma+, Theta-, Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 2.5 }] },
+  { name: "2. Short Put (Naked)", category: "Bullish", description: "Venda de Put a seco.", details: { thesis: "Neutro a levemente altista.", mechanics: "Venda de obrigação de compra.", idealScenario: "Preço acima do strike.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 2.0 }] },
+  { name: "3. Bull Call Spread", category: "Bullish", description: "Trava de Alta com Calls.", details: { thesis: "Alta moderada.", mechanics: "Compra Call ATM, Vende Call OTM.", idealScenario: "Sobe até o strike vendido.", greeks: "Delta+, Theta misto" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }] },
+  { name: "4. Bull Put Spread", category: "Bullish", description: "Trava de Alta com Puts.", details: { thesis: "Alta moderada/lateral.", mechanics: "Vende Put ATM, Compra Put OTM.", idealScenario: "Acima do strike vendido.", greeks: "Delta+, Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 1.0 }] },
+  { name: "5. Call Ratio Spread", category: "Bullish", description: "Compra 1, Vende 2 Calls.", details: { thesis: "Alta leve.", mechanics: "Compra 1 Call, Vende 2 Calls OTM.", idealScenario: "No strike vendido.", greeks: "Delta variável" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 200, price: 2.0 }] },
+  { name: "6. Risk Reversal", category: "Bullish", description: "Compra Call OTM, Vende Put OTM.", details: { thesis: "Alta com proteção de custo.", mechanics: "Financia a Call vendendo Put.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 3.0 }] },
+  { name: "7. Call Backspread", category: "Bullish", description: "Vende 1, Compra 2 Calls.", details: { thesis: "Alta explosiva.", mechanics: "Vende 1 ATM, Compra 2 OTM.", idealScenario: "Movimento brusco de alta.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 200, price: 2.0 }] },
+  { name: "8. Bull Call Ladder", category: "Bullish", description: "Ratio estendido.", details: { thesis: "Alta moderada com crédito.", mechanics: "Bull Spread + Venda Extra.", idealScenario: "Alta gradual.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
+  { name: "9. Synthetic Long", category: "Bullish", description: "Simula compra de ação.", details: { thesis: "Réplica do ativo sem capital.", mechanics: "Compra Call, Vende Put ATM.", idealScenario: "Qualquer alta.", greeks: "Delta 1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }] },
+
+  // BEARISH (10-18)
+  { name: "10. Long Put", category: "Bearish", description: "Compra de Put a seco.", details: { thesis: "Queda direcional.", mechanics: "Direito de venda.", idealScenario: "Queda brusca.", greeks: "Delta-, Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 2.5 }] },
+  { name: "11. Short Call (Naked)", category: "Bearish", description: "Venda de Call a seco.", details: { thesis: "Neutro a baixista.", mechanics: "Vende direito de compra.", idealScenario: "Preço não sobe.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }] },
+  { name: "12. Bear Put Spread", category: "Bearish", description: "Trava de Baixa com Puts.", details: { thesis: "Queda moderada.", mechanics: "Compra Put ATM, Vende OTM.", idealScenario: "Cai até strike vendido.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 2.0 }] },
+  { name: "13. Bear Call Spread", category: "Bearish", description: "Trava de Baixa com Calls.", details: { thesis: "Baixa moderada.", mechanics: "Vende Call ATM, Compra OTM.", idealScenario: "Abaixo do strike.", greeks: "Delta-, Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
+  { name: "14. Put Ratio Spread", category: "Bearish", description: "Compra 1, Vende 2 Puts.", details: { thesis: "Queda moderada.", mechanics: "Financia compra da Put.", idealScenario: "No strike vendido.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 200, price: 1.5 }] },
+  { name: "15. Put Backspread", category: "Bearish", description: "Vende 1, Compra 2 Puts.", details: { thesis: "Crash severo.", mechanics: "Vende cara, compra baratas.", idealScenario: "Queda catastrófica.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 200, price: 2.0 }] },
+  { name: "16. Bear Put Ladder", category: "Bearish", description: "Escada de Baixa.", details: { thesis: "Queda controlada.", mechanics: "Bear Put + Venda extra.", idealScenario: "Queda suave.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 1.0 }] },
+  { name: "17. Synthetic Short", category: "Bearish", description: "Simula venda a descoberto.", details: { thesis: "Queda linear sem aluguer.", mechanics: "Vende Call, Compra Put ATM.", idealScenario: "Qualquer queda.", greeks: "Delta -1" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }] },
+  { name: "18. Synthetic Put", category: "Bearish", description: "Put com Ação.", details: { thesis: "Replicação de Put.", mechanics: "Short Stock + Long Call.", idealScenario: "Queda forte.", greeks: "Delta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Stock', action: 'Sell', strike: spot, quantity: 100, price: spot }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 2.5 }] },
+
+  // VOLATILITY (19-27)
+  { name: "19. Long Straddle", category: "Volatility", description: "Compra Call e Put ATM.", details: { thesis: "Explosão de preço.", mechanics: "Compra Volatilidade pura.", idealScenario: "Movimento forte.", greeks: "Gamma++, Vega++, Theta--" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }] },
+  { name: "20. Long Strangle", category: "Volatility", description: "Compra Put e Call OTM.", details: { thesis: "Explosão (menor custo).", mechanics: "Opções OTM.", idealScenario: "Movimento muito forte.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 2.5 }] },
+  { name: "21. Strip", category: "Volatility", description: "Straddle Bearish.", details: { thesis: "Volatilidade viés baixa.", mechanics: "2 Puts + 1 Call ATM.", idealScenario: "Queda forte.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 200, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }] },
+  { name: "22. Strap", category: "Volatility", description: "Straddle Bullish.", details: { thesis: "Volatilidade viés alta.", mechanics: "2 Calls + 1 Put ATM.", idealScenario: "Alta forte.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 200, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }] },
+  { name: "23. Guts", category: "Volatility", description: "Compra ITM.", details: { thesis: "Volatilidade Deep ITM.", mechanics: "Call/Put ITM.", idealScenario: "Movimento amplo.", greeks: "Delta neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 6.0 }] },
+  { name: "24. Reverse Iron Condor", category: "Volatility", description: "Aposta na explosão.", details: { thesis: "Sair do intervalo.", mechanics: "Compra pontas internas.", idealScenario: "Rompe barreiras.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
+  { name: "25. Short Butterfly (C)", category: "Volatility", description: "Explosão de preço.", details: { thesis: "Sair do centro.", mechanics: "Inverso da borboleta.", idealScenario: "Longe do miolo.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 200, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 1.5 }] },
+  { name: "26. Short Butterfly (P)", category: "Volatility", description: "Versão com Puts.", details: { thesis: "Explosão de preço.", mechanics: "Com Puts.", idealScenario: "Longe do miolo.", greeks: "Vega+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot, quantity: 200, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 1.5 }] },
+  { name: "27. Double Ratio (Vol)", category: "Volatility", description: "Backspread duplo.", details: { thesis: "Grande movimento.", mechanics: "Vende ATM, compra OTM duplo.", idealScenario: "Explosão lateral.", greeks: "Gamma+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 200, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 200, price: 1.5 }] },
+
+  // INCOME (28-38)
+  { name: "28. Short Straddle", category: "Income", description: "Venda ATM.", details: { thesis: "Mercado parado.", mechanics: "Venda de vol ATM.", idealScenario: "Preço estático.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }] },
+  { name: "29. Short Strangle", category: "Income", description: "Venda OTM.", details: { thesis: "Mercado em range.", mechanics: "Venda de vol OTM.", idealScenario: "Entre strikes.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 2.0 }] },
+  { name: "30. Iron Condor", category: "Income", description: "Strangle travado.", details: { thesis: "Lateralização segura.", mechanics: "Bull Put + Bear Call.", idealScenario: "No corpo do condor.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 1.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
+  { name: "31. Iron Butterfly", category: "Income", description: "Straddle travado.", details: { thesis: "Pin no strike central.", mechanics: "Vende ATM, protege OTM.", idealScenario: "Preço exato no miolo.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 2.0 }] },
+  { name: "32. Butterfly (Call)", category: "Income", description: "Borboleta clássica.", details: { thesis: "Alvo preciso.", mechanics: "Simetria 1-2-1.", idealScenario: "Exato no miolo.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 200, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 1.5 }] },
+  { name: "33. Butterfly (Put)", category: "Income", description: "Borboleta com Puts.", details: { thesis: "Alvo preciso.", mechanics: "1-2-1 com Puts.", idealScenario: "No miolo.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 200, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 6.0 }] },
+  { name: "34. Broken Wing (C)", category: "Income", description: "Borboleta assimétrica.", details: { thesis: "Viés de alta + renda.", mechanics: "Asa superior aberta.", idealScenario: "Estável ou alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot, quantity: 200, price: 3.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 0.5 }] },
+  { name: "35. Broken Wing (P)", category: "Income", description: "Borboleta assimétrica P.", details: { thesis: "Viés de baixa + renda.", mechanics: "Asa inferior aberta.", idealScenario: "Estabilidade.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 0.5 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 200, price: 3.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 6.0 }] },
+  { name: "36. Christmas Tree (C)", category: "Income", description: "Christmas Tree 1-3-2.", details: { thesis: "Alta lenta e limitada.", mechanics: "Compra 1, pula strike, vende 3, compra 2.", idealScenario: "No strike vendido.", greeks: "Theta+, Vega-" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 300, price: 1.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 200, price: 0.5 }] },
+  { name: "37. Christmas Tree (P)", category: "Income", description: "Versão com Puts.", details: { thesis: "Queda lenta e limitada.", mechanics: "Com Puts.", idealScenario: "No strike vendido.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 300, price: 1.5 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 200, price: 0.5 }] },
+  { name: "38. Condor (Call)", category: "Income", description: "Corpo largo.", details: { thesis: "Lateralidade ampla.", mechanics: "Borboleta com miolo aberto.", idealScenario: "Entre strikes vendidos.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 9.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 0.5 }] },
+
+  // HEDGE (39-45)
+  { name: "39. Jade Lizard", category: "Hedge", description: "Put + Bear Call.", details: { thesis: "Neutro/Alta sem risco alta.", mechanics: "Soma de crédito.", idealScenario: "Lateral/Alta.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.5 }, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 1.10, quantity: 100, price: 1.0 }] },
+  { name: "40. Twisted Sister", category: "Hedge", description: "Inverso Jade.", details: { thesis: "Neutro/Baixa.", mechanics: "Venda Call + Bull Put.", idealScenario: "Lateral/Queda.", greeks: "Theta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 1.0 }] },
+  { name: "41. Seagull (Bull)", category: "Hedge", description: "Bull Spread financiado.", details: { thesis: "Alta financiada.", mechanics: "Call Spread + Put Short.", idealScenario: "Alta forte.", greeks: "Delta+" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 5.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.90, quantity: 100, price: 3.0 }] },
+  { name: "42. Box Spread", category: "Hedge", description: "Arbitragem.", details: { thesis: "Renda Fixa.", mechanics: "Bull Call + Bear Put.", idealScenario: "Arbitragem livre de risco.", greeks: "Neutro" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 1.05, quantity: 100, price: 6.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot * 0.95, quantity: 100, price: 2.0 }] },
+  { name: "43. Fence (Collar Options)", category: "Hedge", description: "Proteção.", details: { thesis: "Proteção de carteira.", mechanics: "Compra Put, Venda Call.", idealScenario: "Cai protegendo.", greeks: "Delta-" }, setup: (spot) => [{ id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.95, quantity: 100, price: 3.0 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 100, price: 2.5 }] },
+  { name: "44. Ratio Call Write", category: "Hedge", description: "Covered Call 1x2.", details: { thesis: "Renda extra no ativo.", mechanics: "Long Stock + 2 Calls Short.", idealScenario: "Alta moderada.", greeks: "Theta++" }, setup: (spot) => [{ id: generateUUID(), type: 'Stock', action: 'Buy', strike: spot, quantity: 100, price: spot }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.05, quantity: 200, price: 2.0 }] },
+  { name: "45. Synthetic Collar", category: "Hedge", description: "Collar sintético.", details: { thesis: "Proteção total.", mechanics: "Stock Sintético + Collar.", idealScenario: "Alta moderada.", greeks: "Delta limitado" }, setup: (spot) => [{ id: generateUUID(), type: 'Call', action: 'Buy', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Sell', strike: spot, quantity: 100, price: 4.0 }, { id: generateUUID(), type: 'Put', action: 'Buy', strike: spot * 0.90, quantity: 100, price: 1.5 }, { id: generateUUID(), type: 'Call', action: 'Sell', strike: spot * 1.10, quantity: 100, price: 1.0 }] }
 ];
 
-const CategoryTranslation: Record<string, string> = {
-  'Bullish': 'Alta (Bull)', 'Bearish': 'Baixa (Bear)', 'Volatility': 'Volatilidade', 'Income': 'Renda', 'Hedge': 'Hedge'
-};
+const CategoryTranslation = { 'Bullish': 'Alta', 'Bearish': 'Baixa', 'Volatility': 'Volatilidade', 'Income': 'Renda', 'Hedge': 'Proteção' };
 
 /**
- * COMPONENTES UI (Helpers)
+ * COMPONENTES UI (HELPERS)
  */
-
-const Card = ({ children, className = "" }: { children: React.ReactNode, className?: string }) => (
+const Card = ({ children, className = "" }) => (
   <div className={`bg-[#9CB0CE]/20 backdrop-blur-md border border-[#E5F9FF]/10 shadow-lg rounded-xl overflow-hidden ${className}`}>
     {children}
   </div>
 );
 
-const Input = ({ label, value, onChange, type = "number", step = "0.01", min, max, className }: any) => (
-  <div className={`flex flex-col gap-1 ${className}`}>
-    {label && <label className="text-xs text-blue-200/70 font-medium uppercase tracking-wider">{label}</label>}
-    <input 
-      type={type} 
-      step={step}
-      min={min}
-      max={max}
-      value={value} 
-      onChange={onChange}
-      className="bg-black/30 border border-white/10 rounded-md px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-400 transition-colors w-full"
-    />
-  </div>
-);
-
-const Select = ({ label, value, onChange, options }: any) => (
-  <div className="flex flex-col gap-1">
-    <label className="text-xs text-blue-200/70 font-medium uppercase tracking-wider">{label}</label>
-    <select 
-      value={value} 
-      onChange={onChange}
-      className="bg-black/30 border border-white/10 rounded-md px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-400 transition-colors appearance-none cursor-pointer"
-    >
-      {options.map((opt: any) => (
-        <option key={opt.value} value={opt.value} className="bg-slate-900 text-white">{opt.label}</option>
-      ))}
-    </select>
-  </div>
-);
-
-const ToastContainer = ({ toasts, removeToast }: { toasts: Toast[], removeToast: (id: number) => void }) => {
-  return (
-    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none">
-      {toasts.map(toast => (
-        <div 
-          key={toast.id} 
-          className={`
-            pointer-events-auto transform transition-all duration-300 ease-in-out
-            flex items-center gap-3 p-4 rounded-lg shadow-2xl border backdrop-blur-md
-            ${toast.type === 'success' ? 'bg-emerald-900/80 border-emerald-500/30 text-emerald-100' : ''}
-            ${toast.type === 'error' ? 'bg-red-900/80 border-red-500/30 text-red-100' : ''}
-            ${toast.type === 'info' ? 'bg-blue-900/80 border-blue-500/30 text-blue-100' : ''}
-          `}
-        >
-          {toast.type === 'success' && <Check size={20} className="text-emerald-400" />}
-          {toast.type === 'error' && <AlertCircle size={20} className="text-red-400" />}
-          {toast.type === 'info' && <Info size={20} className="text-blue-400" />}
-          
-          <p className="text-sm font-medium flex-1">{toast.message}</p>
-          
-          <button onClick={() => removeToast(toast.id)} className="text-white/40 hover:text-white transition-colors">
-            <X size={16} />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-};
-
-const SaveDialog = ({ onClose, onSaveNew, onUpdate, strategyName }: any) => (
-  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-    <Card className="w-full max-w-md bg-[#111C2C] p-6 flex flex-col gap-4">
-      <h3 className="text-lg font-bold text-white">Salvar Estratégia</h3>
-      <p className="text-sm text-white/70">
-        Está a editar "{strategyName}". Deseja atualizar a versão existente ou criar uma nova?
-      </p>
-      <div className="flex flex-col gap-2 mt-2">
-        <button 
-          onClick={onUpdate}
-          className="flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all"
-        >
-          <RefreshCw size={18} /> Atualizar Existente
-        </button>
-        <button 
-          onClick={onSaveNew}
-          className="flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all"
-        >
-          <Save size={18} /> Salvar como Nova
-        </button>
-        <button 
-          onClick={onClose}
-          className="mt-2 text-sm text-white/40 hover:text-white"
-        >
-          Cancelar
-        </button>
+const ToastContainer = ({ toasts, removeToast }) => (
+  <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none">
+    {toasts.map(t => (
+      <div key={t.id} className={`pointer-events-auto flex items-center gap-3 p-4 rounded-lg shadow-2xl border backdrop-blur-md transition-all duration-300 ${t.type === 'success' ? 'bg-emerald-900/80 border-emerald-500/30 text-emerald-100' : t.type === 'error' ? 'bg-red-900/80 border-red-500/30 text-red-100' : 'bg-blue-900/80 border-blue-500/30 text-blue-100'}`}>
+        {t.type === 'success' ? <Check size={18} /> : t.type === 'error' ? <AlertCircle size={18} /> : <Info size={18} />}
+        <p className="text-sm font-medium flex-1">{t.message}</p>
+        <button onClick={() => removeToast(t.id)} className="opacity-50 hover:opacity-100"><X size={16} /></button>
       </div>
-    </Card>
+    ))}
   </div>
 );
 
 /**
- * MAIN APP
+ * ENGINE MATEMÁTICA PAYOFF & CONSOLIDAÇÃO
+ */
+const getOptionValueAtExpiry = (type, strike, spot) => {
+  if (type === 'Call') return Math.max(0, spot - strike);
+  if (type === 'Put') return Math.max(0, strike - spot);
+  if (type === 'Stock') return spot;
+  return 0;
+};
+
+const calculatePayoff = (legs, spotRange) => {
+  return spotRange.map(spot => {
+    let totalPnl = 0;
+    legs.forEach(leg => {
+      const vAtE = getOptionValueAtExpiry(leg.type, leg.strike, spot);
+      const cost = leg.quantity * leg.price;
+      if (leg.action === 'Buy') totalPnl += (vAtE * leg.quantity) - cost;
+      else totalPnl += cost - (vAtE * leg.quantity);
+    });
+    return { price: spot, value: totalPnl };
+  });
+};
+
+/**
+ * MAIN APP COMPONENT
  */
 export default function OptionsStrategyBuilder() {
-  const [spotPrice, setSpotPrice] = useState<number>(100);
-  const [simulatedSpot, setSimulatedSpot] = useState<number>(100); 
-  const [strategyName, setStrategyName] = useState<string>("Estratégia Personalizada");
-  const [legs, setLegs] = useState<Leg[]>([]);
-  const [isSaving, setIsSaving] = useState(false);
-  const [showLoadModal, setShowLoadModal] = useState(false);
-  const [savedSimulations, setSavedSimulations] = useState<any[]>([]);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [spotPrice, setSpotPrice] = useState(100);
+  const [simulatedSpot, setSimulatedSpot] = useState(100); 
+  const [legs, setLegs] = useState([]);
+  const [toasts, setToasts] = useState([]);
+  const [strategyName, setStrategyName] = useState("Custom");
   
-  const reportRef = useRef<HTMLDivElement>(null);
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [tickerQuery, setTickerQuery] = useState("PETR4");
+  const [isFetchingMarket, setIsFetchingMarket] = useState(false);
+  const [marketData, setMarketData] = useState(null);
+  const [selectedExpiry, setSelectedExpiration] = useState("");
 
-  const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  const addToast = (msg, type = 'info') => {
     const id = Date.now();
-    setToasts(prev => [...prev, { id, message, type }]);
+    setToasts(prev => [...prev, { id, message: msg, type }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000); 
   };
 
-  const removeToast = (id: number) => setToasts(prev => prev.filter(t => t.id !== id));
-
-  useEffect(() => {
-    const script = document.createElement('script');
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
-    script.async = true;
-    document.body.appendChild(script);
-    return () => {
-      document.body.removeChild(script);
-    }
-  }, []);
-
-  useEffect(() => {
-    const defaultStrat = STRATEGIES.find(s => s.name.includes("Long Call"));
-    if(defaultStrat) {
-      setLegs(defaultStrat.setup(100));
-      setSimulatedSpot(100);
-    }
-  }, []);
-
   useEffect(() => { setSimulatedSpot(spotPrice); }, [spotPrice]);
 
-  const handleStrategyChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+  // FETCH MARKET DATA
+  const fetchMarketData = async () => {
+    if (!tickerQuery) return;
+    setIsFetchingMarket(true);
+    addToast(`Consolidando dados reais de ${tickerQuery.toUpperCase()}...`, 'info');
+    try {
+      const response = await fetch(`${GAS_URL}?ticker=${tickerQuery.toUpperCase()}`);
+      const json = await response.json();
+      if (json.status === 'success' && json.data.chain.length > 0) {
+        const enrichedChain = json.data.chain.map(opt => ({
+          ...opt, ...calculateGreeks(json.data.spotPrice, opt.strike, opt.daysToMaturity, opt.impliedVolatility, opt.type)
+        }));
+        setMarketData({ ...json.data, chain: enrichedChain });
+        setSpotPrice(json.data.spotPrice);
+        const dates = [...new Set(enrichedChain.map(opt => opt.expirationDate))];
+        if (dates.length > 0) setSelectedExpiration(dates[0]);
+        addToast(`Matriz carregada: Spot ${json.data.spotPrice}`, 'success');
+      }
+    } catch (e) { addToast("Erro ao conectar ao Gateway.", 'error'); } finally { setIsFetchingMarket(false); }
+  };
+
+  const handleStrategyTemplateChange = (e) => {
     const selected = STRATEGIES.find(s => s.name === e.target.value);
     if (selected) {
       setStrategyName(selected.name);
-      setLegs(selected.setup(spotPrice));
-      setEditingId(null);
-      addToast(`Estratégia ${selected.name} carregada`, 'info');
-    } else {
-      setStrategyName("Estratégia Personalizada");
-    }
+      const newLegs = selected.setup(spotPrice).map(leg => {
+        const match = marketData?.chain.find(o => Math.abs(o.strike - leg.strike) < 0.2 && o.type === leg.type);
+        return { ...leg, delta: match?.delta, gamma: match?.gamma, theta: match?.theta, vega: match?.vega };
+      });
+      setLegs(newLegs);
+      addToast(`Template ${selected.name} aplicado.`, 'success');
+    } else { setStrategyName("Custom"); }
   };
 
-  const updateLeg = (id: string, field: keyof Leg, value: any) => {
+  const addLegFromMarket = (option, action) => {
+    if (!option) return;
+    setLegs([...legs, { 
+      id: generateUUID(), type: option.type, action, strike: option.strike, quantity: 100, 
+      price: action === 'Buy' ? option.ask : option.bid, ...option
+    }]);
+  };
+
+  const updateLeg = (id, field, value) => {
     setLegs(prev => prev.map(leg => leg.id === id ? { ...leg, [field]: value } : leg));
   };
 
-  const addLeg = () => {
-    setLegs([...legs, { id: generateUUID(), type: 'Call', action: 'Buy', strike: spotPrice, quantity: 1, price: 1.0 }]);
-  };
-
-  const removeLeg = (id: string) => setLegs(legs.filter(l => l.id !== id));
-
-  const handleExport = async () => {
-    if (!reportRef.current) return;
-    
-    const html2canvas = (window as any).html2canvas;
-    if (!html2canvas) {
-      addToast("A carregar biblioteca de exportação, tente novamente em instantes.", 'info');
-      return;
-    }
-    
-    addToast("A gerar relatório de trabalho... aguarde.", 'info');
-    
-    try {
-      await new Promise(r => setTimeout(r, 100));
-      
-      const canvas = await html2canvas(reportRef.current, {
-        backgroundColor: '#111C2C', 
-        scale: 2, 
-        useCORS: true,
-        onclone: (clonedDoc: any) => {
-          const container = clonedDoc.getElementById('report-container');
-          
-          const inputs = container.querySelectorAll('input');
-          inputs.forEach((input: any) => {
-            if (input.type !== 'range' && input.type !== 'checkbox' && input.type !== 'radio') {
-              const div = clonedDoc.createElement('div');
-              div.innerText = input.value;
-              div.className = input.className;
-              div.style.display = 'flex';
-              div.style.alignItems = 'center';
-              div.style.overflow = 'visible';
-              input.parentNode.replaceChild(div, input);
-            }
-          });
-
-          const selects = container.querySelectorAll('select');
-          selects.forEach((select: any) => {
-             const div = clonedDoc.createElement('div');
-             const selectedText = select.options[select.selectedIndex]?.text || select.value;
-             div.innerText = selectedText;
-             div.className = select.className;
-             div.style.display = 'flex';
-             div.style.alignItems = 'center';
-             div.style.overflow = 'visible';
-             div.classList.remove('appearance-none');
-             select.parentNode.replaceChild(div, select);
-          });
-          
-          const watermark = clonedDoc.createElement('div');
-          watermark.innerText = `Gerado em: ${new Date().toLocaleString('pt-BR')} | Arquiteto de Opções`;
-          watermark.style.position = 'absolute';
-          watermark.style.bottom = '10px';
-          watermark.style.right = '20px';
-          watermark.style.color = 'rgba(255,255,255,0.3)';
-          watermark.style.fontSize = '10px';
-          watermark.style.fontFamily = 'monospace';
-          if (container) container.appendChild(watermark);
-        }
-      });
-
-      const image = canvas.toDataURL("image/png");
-      const link = document.createElement("a");
-      const cleanName = strategyName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-      link.href = image;
-      link.download = `Papel_Trabalho_${cleanName}_${new Date().toISOString().split('T')[0]}.png`;
-      link.click();
-      
-      addToast("Relatório exportado com sucesso!", 'success');
-    } catch (error) {
-      console.error(error);
-      addToast("Erro ao gerar relatório.", 'error');
-    }
-  };
-
-  const handleSaveClick = () => {
-    if (editingId) {
-      setShowSaveDialog(true);
-    } else {
-      saveToSheets('create');
-    }
-  };
-
-  const saveToSheets = async (action: 'create' | 'update') => {
-    setShowSaveDialog(false);
-    setIsSaving(true);
-    
-    const idToSend = action === 'update' ? editingId : null; 
-
-    const payload = { 
-      action,
-      id: idToSend,
-      strategyName, 
-      spotPrice, 
-      legsData: legs, 
-      metrics: calculatedMetrics 
-    };
-
-    try {
-      await fetch(GAS_URL, {
-        method: 'POST',
-        // Sem mode: 'no-cors' para capturar respostas corretas do backend
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload)
-      });
-      
-      const msg = action === 'update' ? "Estratégia atualizada com sucesso!" : "Nova estratégia guardada com sucesso!";
-      addToast(msg, 'success');
-      
-      if (action === 'create') setEditingId(null);
-
-    } catch (error) {
-      console.error(error);
-      addToast("Erro de ligação ao guardar os registos.", 'error');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const deleteSimulation = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation(); 
-    if (!confirm("Tem a certeza que deseja excluir esta estratégia?")) return;
-
-    try {
-      await fetch(GAS_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: 'delete', id: String(id) })
-      });
-      
-      setSavedSimulations(prev => prev.filter(s => s.id !== id));
-      addToast("Estratégia excluída.", 'success');
-    } catch (error) {
-      addToast("Erro ao eliminar.", 'error');
-    }
-  };
-
-  const loadFromSheets = async () => {
-    try {
-      const auditUrl = `${GAS_URL}?no_cache=${new Date().getTime()}`;
-      const response = await fetch(auditUrl);
-      if (!response.ok) throw new Error(`Erro HTTP: ${response.status}`);
-      const text = await response.text();
-      let data;
-      try { data = JSON.parse(text); } catch (e) { throw new Error("Dados inválidos recebidos do servidor."); }
-      if (!Array.isArray(data)) throw new Error("Formato inválido.");
-
-      setSavedSimulations(data);
-      setShowLoadModal(true);
-      addToast("Histórico carregado", 'success');
-    } catch (error: any) {
-      addToast(`Erro ao carregar ficheiro: ${error.message}`, 'error');
-    }
-  };
-
-  const loadSimulation = (sim: any) => {
-    setStrategyName(sim.name);
-    setSpotPrice(parseFloat(sim.spot));
-    setSimulatedSpot(parseFloat(sim.spot));
-    setLegs(sim.legs);
-    setEditingId(sim.id);
-    setShowLoadModal(false);
-    addToast(`A editar: ${sim.name}`, 'info');
-  };
-
-  const chartRange = useMemo(() => {
-    const range: number[] = [];
-    const lower = spotPrice * 0.7;
-    const upper = spotPrice * 1.3;
-    const step = (upper - lower) / 100;
+  // CALCULATED METRICS
+  const payoffData = useMemo(() => {
+    const range = [];
+    const lower = spotPrice * 0.7, upper = spotPrice * 1.3, step = (upper - lower) / 100;
     for (let p = lower; p <= upper; p += step) range.push(p);
-    return range;
-  }, [spotPrice]);
+    return calculatePayoff(legs, range);
+  }, [legs, spotPrice]);
 
-  const payoffData = useMemo(() => calculatePayoff(legs, chartRange), [legs, chartRange]);
-  const calculatedMetrics = useMemo(() => calculateMetrics(legs, payoffData), [legs, payoffData]);
-  const simulatedMetric = useMemo(() => calculatePayoff(legs, [simulatedSpot])[0].value, [legs, simulatedSpot]);
-  const currentStrategyInfo = useMemo(() => STRATEGIES.find(s => s.name === strategyName), [strategyName]);
+  const metrics = useMemo(() => {
+    let cost = 0, dInf = 0, pZero = 0, tD = 0, tG = 0, tT = 0, tV = 0;
+    legs.forEach(l => {
+      const isB = l.action === 'Buy', m = isB ? 1 : -1, c = l.quantity * l.price;
+      if (isB) cost += c; else cost -= c;
+      if (l.type === 'Call' || l.type === 'Stock') dInf += isB ? l.quantity : -l.quantity;
+      const vZ = getOptionValueAtExpiry(l.type, l.strike, 0);
+      pZero += isB ? (vZ * l.quantity) - c : c - (vZ * l.quantity);
+      if (l.delta) tD += l.delta * l.quantity * m;
+      if (l.gamma) tG += l.gamma * l.quantity * m;
+      if (l.theta) tT += l.theta * l.quantity * m;
+      if (l.vega) tV += l.vega * l.quantity * m;
+    });
+    const vals = payoffData.map(p => p.value);
+    let mP = Math.max(...vals, pZero), mL = Math.min(...vals, pZero);
+    if (dInf > 0) mP = "Ilimitado"; if (dInf < 0) mL = "Ilimitado";
+    const be = [];
+    for (let i = 1; i < payoffData.length; i++) {
+      if (payoffData[i-1].value * payoffData[i].value <= 0 && payoffData[i-1].value !== payoffData[i].value) {
+        be.push(parseFloat((payoffData[i-1].price - payoffData[i-1].value * (payoffData[i].price - payoffData[i-1].price) / (payoffData[i].value - payoffData[i-1].value)).toFixed(2)));
+      }
+    }
+    return { cost, maxProfit: mP, maxLoss: mL, breakevens: Array.from(new Set(be)), greeks: { delta: tD, gamma: tG, theta: tT, vega: tV } };
+  }, [legs, payoffData]);
 
-  const riskAnalysis = useMemo(() => {
-    const hasShortLegs = legs.some(l => l.action === 'Sell' && l.type !== 'Stock');
-    const isUndefinedRisk = typeof calculatedMetrics.maxLoss === 'string';
-    let marginType = "Isento", marginValue = "R$ 0,00", riskProfile = "Risco Definido", alertLevel: 'low' | 'medium' | 'high' = 'low';
+  const tBoardData = useMemo(() => {
+    if (!marketData || !selectedExpiry) return [];
+    const optionsForExpiry = marketData.chain.filter(o => o.expirationDate === selectedExpiry);
+    const strikes = [...new Set(optionsForExpiry.map(o => o.strike))].sort((a, b) => a - b);
+    return strikes.map(strike => ({
+      strike,
+      call: optionsForExpiry.find(o => o.strike === strike && o.type === 'Call'),
+      put: optionsForExpiry.find(o => o.strike === strike && o.type === 'Put')
+    }));
+  }, [marketData, selectedExpiry]);
 
-    if (!hasShortLegs) { marginType = "Isento (Prémio)"; riskProfile = "Limitado ao Pago"; alertLevel = 'low'; }
-    else if (isUndefinedRisk) { marginType = "Chamada de Margem B3"; marginValue = "Elevada / Garantia"; riskProfile = "Risco Ilimitado"; alertLevel = 'high'; }
-    else { marginType = "Travada (Max Loss)"; if (typeof calculatedMetrics.maxLoss === 'number') marginValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Math.abs(calculatedMetrics.maxLoss)); riskProfile = "Travado (Spread)"; alertLevel = 'medium'; }
-    return { marginType, marginValue, riskProfile, alertLevel };
-  }, [legs, calculatedMetrics]);
-
-  const formatCurrency = (val: number | string) => {
-    if (typeof val === 'string') return val;
-    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2 }).format(val);
-  };
+  const currentStratInfo = STRATEGIES.find(s => s.name === strategyName);
 
   return (
-    <div className="min-h-screen font-sans text-slate-100 bg-[linear-gradient(85.3deg,#111C2C_2.23%,#395D92_232.74%)] p-4 md:p-8 overflow-x-hidden selection:bg-blue-500/30">
-      <ToastContainer toasts={toasts} removeToast={removeToast} />
-      {showSaveDialog && <SaveDialog onClose={() => setShowSaveDialog(false)} onSaveNew={() => saveToSheets('create')} onUpdate={() => saveToSheets('update')} strategyName={strategyName} />}
+    <div className="min-h-screen font-sans text-slate-100 bg-[#111C2C] p-4 md:p-8 selection:bg-blue-500/30">
+      <ToastContainer toasts={toasts} removeToast={(id) => setToasts(prev => prev.filter(t => t.id !== id))} />
 
+      {/* HEADER DINÂMICO */}
       <header className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
         <div>
-          <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-200 to-white flex items-center gap-3">
-            <Activity className="text-blue-400" /> Arquiteto de Opções
+          <h1 className="text-3xl font-black bg-clip-text text-transparent bg-gradient-to-r from-blue-200 to-white flex items-center gap-3">
+            <Activity className="text-blue-400" /> Arquiteto v2.2
           </h1>
-          <p className="text-blue-200/60 text-sm mt-1">Simulador e Analisador Avançado de Estratégias</p>
+          <p className="text-blue-200/50 text-xs font-bold uppercase tracking-widest">Plataforma de Auditoria & Cálculo Quantitativo</p>
         </div>
-        <div className="flex gap-3">
-          <button onClick={handleExport} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-200 transition-all text-sm font-medium"><FileText size={16} /> Exportar Relatório</button>
-          <button onClick={loadFromSheets} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-sm font-medium"><Download size={16} /> Carregar</button>
-          <button onClick={handleSaveClick} disabled={isSaving} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-500 hover:bg-blue-600 shadow-lg shadow-blue-500/20 transition-all text-sm font-bold text-white">
-            {isSaving ? <span className="animate-spin">⌛</span> : (editingId ? <RefreshCw size={16} /> : <Save size={16} />)} 
-            {editingId ? "Atualizar / Salvar" : "Salvar"}
-          </button>
+        
+        <div className="flex gap-4">
+          <div className="flex flex-col gap-1">
+            <label className="text-[9px] text-blue-300 font-black uppercase tracking-tighter">Modelos (45 Estratégias)</label>
+            <select onChange={handleStrategyTemplateChange} value={strategyName} className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-xs font-bold text-white outline-none hover:bg-black/60 transition-all cursor-pointer">
+              <option value="Custom">Custom Setup</option>
+              {STRATEGIES.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[9px] text-blue-300 font-black uppercase tracking-tighter">Real-Time Data B3</label>
+            <div className="flex gap-2 bg-black/40 p-1 rounded-lg border border-white/10 shadow-inner">
+              <input type="text" value={tickerQuery} onChange={(e) => setTickerQuery(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === 'Enter' && fetchMarketData()} className="bg-transparent border-none outline-none text-white px-2 w-20 font-black uppercase text-sm" />
+              <button onClick={fetchMarketData} disabled={isFetchingMarket} className="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded-md text-[10px] font-black flex items-center gap-2 transition-all">
+                {isFetchingMarket ? <RefreshCw className="animate-spin" size={12} /> : <Search size={12} />} ANALISAR
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
-      <div id="report-container" ref={reportRef} className="grid grid-cols-1 lg:grid-cols-3 gap-6 p-4 rounded-xl relative">
-        
-        {/* LEFT COLUMN */}
-        <div className="lg:col-span-2 flex flex-col gap-6">
-          <Card className="p-5">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="md:col-span-1"><Input label="Preço do Ativo (Spot)" value={spotPrice} onChange={(e: any) => setSpotPrice(parseFloat(e.target.value))} /></div>
-              <div className="md:col-span-2"><Select label="Modelo de Estratégia" value={strategyName} onChange={handleStrategyChange} options={[{ value: "Custom", label: "Estratégia Personalizada" }, ...STRATEGIES.map(s => ({ value: s.name, label: `${CategoryTranslation[s.category]}: ${s.name}` }))]} /></div>
-            </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* COLUNA ESQUERDA: VISUALIZAÇÃO E POSIÇÃO */}
+        <div className="lg:col-span-2 space-y-6">
+          <Card className="p-4 h-[420px] relative bg-slate-900/40">
+             <div className={`absolute top-12 left-1/2 transform -translate-x-1/2 z-20 px-8 py-3 rounded-2xl border backdrop-blur-xl shadow-2xl transition-all duration-500 ${metrics.cost <= 0 ? 'bg-emerald-900/40 border-emerald-500/20' : 'bg-red-900/40 border-red-500/20'}`}>
+                <div className="text-[9px] font-black uppercase tracking-[0.2em] text-center opacity-50 mb-1">Total PnL Projection</div>
+                <div className="text-3xl font-black text-center">{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(calculatePayoff(legs, [simulatedSpot])[0]?.value || 0)}</div>
+             </div>
+             <ResponsiveContainer width="100%" height="100%">
+               <AreaChart data={payoffData} margin={{ top: 40, right: 30, left: 0, bottom: 0 }}>
+                 <defs><linearGradient id="cP" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10B981" stopOpacity={0.4}/><stop offset="95%" stopColor="#10B981" stopOpacity={0}/></linearGradient></defs>
+                 <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
+                 <XAxis dataKey="price" stroke="#475569" tick={{fontSize: 10, fontWeight: 'bold'}} />
+                 <YAxis stroke="#475569" tick={{fontSize: 10}} tickFormatter={v => `R$${v}`} />
+                 <Tooltip contentStyle={{backgroundColor: '#0f172a', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)'}} itemStyle={{fontWeight: 'bold'}} />
+                 <ReferenceLine y={0} stroke="#64748b" strokeWidth={1} />
+                 <ReferenceLine x={spotPrice} stroke="#fbbf24" strokeDasharray="5 5" label={{value: 'SPOT', fill: '#fbbf24', fontSize: 10, fontWeight: '900'}} />
+                 <ReferenceLine x={simulatedSpot} stroke="#fff" label={{value: 'WHAT-IF', fill: '#fff', fontSize: 10, fontWeight: '900'}} />
+                 <Area type="monotone" dataKey="value" stroke="#519CFF" strokeWidth={4} fill="url(#cP)" />
+               </AreaChart>
+             </ResponsiveContainer>
+             <div className="mt-4 px-10">
+                <input type="range" min={spotPrice * 0.7} max={spotPrice * 1.3} step={0.01} value={simulatedSpot} onChange={(e) => setSimulatedSpot(parseFloat(e.target.value))} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500" />
+             </div>
           </Card>
 
-          <Card className="p-1 h-[450px] relative group flex flex-col">
-            <div className="absolute top-4 left-4 z-10 bg-black/40 backdrop-blur px-3 py-1 rounded text-xs border border-white/10 flex gap-4"><span>Payoff no Vencimento</span><span className="text-blue-300">Simulação: {formatCurrency(simulatedSpot)}</span></div>
-            <div className={`absolute top-16 left-1/2 transform -translate-x-1/2 z-20 px-4 py-2 rounded-lg shadow-xl border backdrop-blur-md transition-colors duration-300 ${simulatedMetric >= 0 ? 'bg-emerald-900/60 border-emerald-500/30 text-emerald-100' : 'bg-red-900/60 border-red-500/30 text-red-100'}`}><div className="text-xs uppercase tracking-wider opacity-70 text-center">Resultado Simulado</div><div className="text-xl font-bold text-center">{formatCurrency(simulatedMetric)}</div></div>
-            <ResponsiveContainer width="100%" height="100%" className="flex-1">
-              <AreaChart data={payoffData} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
-                <defs><linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10B981" stopOpacity={0.3}/><stop offset="95%" stopColor="#10B981" stopOpacity={0}/></linearGradient></defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" vertical={false} />
-                <XAxis dataKey="price" stroke="#94a3b8" tickFormatter={(val) => val.toLocaleString('pt-BR')} tick={{fontSize: 12}} />
-                <YAxis stroke="#94a3b8" tickFormatter={(val) => formatCurrency(val)} tick={{fontSize: 12}} />
-                <Tooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#fff' }} itemStyle={{ color: '#fff' }} formatter={(value: number) => [formatCurrency(value), 'Resultado']} labelFormatter={(label) => `Spot: ${formatCurrency(parseFloat(label))}`} />
-                <ReferenceLine y={0} stroke="#64748b" strokeDasharray="3 3" />
-                <ReferenceLine x={spotPrice} stroke="#fbbf24" strokeDasharray="3 3" label={{ position: 'insideBottom', value: 'Spot', fill: '#fbbf24', fontSize: 10 }} />
-                <ReferenceLine x={simulatedSpot} stroke="#ffffff" strokeWidth={2} label={{ position: 'top', value: 'Sim', fill: '#ffffff', fontSize: 10 }} />
-                <Area type="monotone" dataKey="value" stroke="#519CFF" strokeWidth={2} fill="url(#colorProfit)" />
-              </AreaChart>
-            </ResponsiveContainer>
-            <div className="px-6 py-4 bg-black/20 border-t border-white/5" data-html2canvas-ignore="true">
-              <div className="flex justify-between items-center text-xs text-blue-200/50 mb-2"><span>-30%</span><span className="text-white font-bold">Ajuste o Preço para Simular Cenários (What-if)</span><span>+30%</span></div>
-              <input type="range" min={spotPrice * 0.7} max={spotPrice * 1.3} step={(spotPrice * 0.6) / 200} value={simulatedSpot} onChange={(e) => setSimulatedSpot(parseFloat(e.target.value))} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-all" />
-              <div className="flex justify-between mt-2"><span className="text-xs font-mono text-slate-400">{formatCurrency(spotPrice * 0.7)}</span><button onClick={() => setSimulatedSpot(spotPrice)} className="text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded text-white transition-colors">Resetar</button><span className="text-xs font-mono text-slate-400">{formatCurrency(spotPrice * 1.3)}</span></div>
+          <Card className="p-0 bg-slate-900/20">
+            <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5">
+              <h3 className="text-xs font-black uppercase tracking-widest text-blue-200">Portfolio Consolidation</h3>
+              <button onClick={() => setLegs([])} className="text-[10px] font-black text-white/20 hover:text-red-400 uppercase transition-colors">Clear All Positions</button>
             </div>
-          </Card>
-
-          <Card className="p-0 overflow-hidden">
-            <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5"><h3 className="text-sm font-semibold text-blue-200 uppercase tracking-wide flex items-center gap-2"><LayoutGrid size={16} /> Pernas da Estratégia</h3><button onClick={addLeg} className="text-xs bg-blue-500/20 hover:bg-blue-500/40 text-blue-300 px-2 py-1 rounded border border-blue-500/30 transition-colors flex items-center gap-1" data-html2canvas-ignore="true"><Plus size={14} /> Adicionar Perna</button></div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left">
-                <thead className="text-xs text-blue-200/50 uppercase bg-black/20"><tr><th className="px-4 py-3">Ação</th><th className="px-4 py-3">Tipo</th><th className="px-4 py-3">Strike ($)</th><th className="px-4 py-3">Qtd</th><th className="px-4 py-3">Prémio ($)</th><th className="px-4 py-3" data-html2canvas-ignore="true"></th></tr></thead>
-                <tbody className="divide-y divide-white/5">{legs.map((leg) => (<tr key={leg.id} className="hover:bg-white/5 transition-colors"><td className="px-4 py-2"><select value={leg.action} onChange={(e) => updateLeg(leg.id, 'action', e.target.value)} className={`bg-transparent font-bold cursor-pointer outline-none ${leg.action === 'Buy' ? 'text-green-400' : 'text-red-400'}`}><option value="Buy" className="bg-slate-800 text-green-400">Compra</option><option value="Sell" className="bg-slate-800 text-red-400">Venda</option></select></td><td className="px-4 py-2"><select value={leg.type} onChange={(e) => updateLeg(leg.id, 'type', e.target.value)} className="bg-transparent text-white cursor-pointer outline-none"><option value="Call" className="bg-slate-800">Call</option><option value="Put" className="bg-slate-800">Put</option><option value="Stock" className="bg-slate-800">Ação</option></select></td><td className="px-4 py-2"><input type="number" value={leg.type === 'Stock' ? '-' : leg.strike} disabled={leg.type === 'Stock'} onChange={(e) => updateLeg(leg.id, 'strike', parseFloat(e.target.value))} className="bg-black/20 w-24 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none disabled:opacity-50"/></td><td className="px-4 py-2"><input type="number" value={leg.quantity} onChange={(e) => updateLeg(leg.id, 'quantity', parseFloat(e.target.value))} className="bg-black/20 w-16 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2"><input type="number" step="0.01" value={leg.price} onChange={(e) => updateLeg(leg.id, 'price', parseFloat(e.target.value))} className="bg-black/20 w-20 px-2 py-1 rounded text-white border border-transparent focus:border-blue-500/50 outline-none"/></td><td className="px-4 py-2 text-right" data-html2canvas-ignore="true"><button onClick={() => removeLeg(leg.id)} className="text-white/20 hover:text-red-400 transition-colors"><Trash2 size={16} /></button></td></tr>))}</tbody>
+            <div className="overflow-x-auto max-h-[300px] custom-scrollbar">
+              <table className="w-full text-xs text-left">
+                 <thead className="bg-black/40 text-[9px] font-black uppercase text-white/30 sticky top-0 z-10"><tr className="border-b border-white/5"><th className="p-4">OP</th><th className="p-4">TYPE</th><th className="p-4">STRIKE</th><th className="p-4 text-center">QUANTITY</th><th className="p-4">PRICE</th><th className="p-4">DELTA</th><th className="p-4 text-right">ACTION</th></tr></thead>
+                 <tbody className="divide-y divide-white/5">
+                   {legs.map(l => (
+                     <tr key={l.id} className="hover:bg-white/5 group transition-all">
+                       <td className="p-4"><span className={`px-2 py-0.5 rounded text-[10px] font-black ${l.action === 'Buy' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>{l.action === 'Buy' ? 'BUY' : 'SELL'}</span></td>
+                       <td className="p-4 font-black text-white/80">{l.type}</td>
+                       <td className="p-4 text-blue-300 font-mono font-bold">{l.type === 'Stock' ? '---' : l.strike.toFixed(2)}</td>
+                       <td className="p-4 text-center"><input type="number" value={l.quantity} onChange={(e) => updateLeg(l.id, 'quantity', parseInt(e.target.value) || 0)} className="bg-black/40 w-20 px-2 py-1 rounded text-center outline-none border border-transparent focus:border-blue-500/50 font-mono" /></td>
+                       <td className="p-4 font-mono">R${l.price.toFixed(2)}</td>
+                       <td className="p-4 text-white/20 font-mono">{l.delta ? l.delta.toFixed(3) : '-'}</td>
+                       <td className="p-4 text-right"><button onClick={() => removeLeg(l.id)} className="text-white/10 group-hover:text-red-400 transition-colors"><Trash2 size={16}/></button></td>
+                     </tr>
+                   ))}
+                 </tbody>
               </table>
+              {legs.length === 0 && <div className="p-16 text-center text-white/10 italic text-sm font-bold uppercase tracking-widest">Nenhuma perna ativa. Selecione um modelo ou use a matriz lateral.</div>}
             </div>
-            {legs.length === 0 && <div className="p-8 text-center text-white/30 italic">Nenhuma perna definida.</div>}
           </Card>
         </div>
 
-        {/* RIGHT COLUMN */}
-        <div className="flex flex-col gap-6">
-          <Card className="p-6 bg-gradient-to-br from-[#9CB0CE]/20 to-[#395D92]/30">
-            <h3 className="text-xs font-bold text-blue-200 uppercase tracking-widest mb-6 border-b border-white/10 pb-2">Análise da Estrutura</h3>
+        {/* COLUNA DIREITA: INDICADORES E MATRIZ */}
+        <div className="space-y-6">
+          <Card className="p-6 bg-gradient-to-br from-slate-900 to-blue-950 border-blue-500/30 relative overflow-hidden shadow-2xl">
+            <div className="absolute top-0 right-0 p-4 opacity-5"><Shield size={80} /></div>
+            <h3 className="text-[10px] font-black uppercase text-blue-400 tracking-[0.3em] mb-6 border-b border-white/10 pb-3">Accounting & Risk</h3>
             <div className="space-y-6">
-              <div className="flex justify-between items-end"><div><div className="text-white/50 text-xs mb-1">Custo de Entrada</div><div className={`text-2xl font-bold flex items-center gap-2 ${calculatedMetrics.cost > 0 ? 'text-red-300' : 'text-green-300'}`}>{calculatedMetrics.cost > 0 ? <TrendingDown size={20} /> : <TrendingUp size={20} />}{formatCurrency(Math.abs(calculatedMetrics.cost))}</div><div className="text-xs mt-1 text-white/40">{calculatedMetrics.cost > 0 ? "Débito (Pagar)" : "Crédito (Receber)"}</div></div><div className="p-3 rounded-full bg-white/5"><DollarSign className="text-white/60" size={24} /></div></div>
-              <div className="h-px bg-white/10 w-full" />
-              <div className="flex flex-col gap-1"><span className="text-xs text-white/50 uppercase">Lucro Máximo</span><span className="text-xl font-medium text-green-400">{typeof calculatedMetrics.maxProfit === 'number' ? formatCurrency(calculatedMetrics.maxProfit) : 'Ilimitado'}</span></div>
-              <div className="flex flex-col gap-1"><span className="text-xs text-white/50 uppercase">Risco Máximo</span><span className="text-xl font-medium text-red-400">{typeof calculatedMetrics.maxLoss === 'number' ? formatCurrency(Math.abs(calculatedMetrics.maxLoss)) : 'Ilimitado'}</span></div>
-              <div className="flex flex-col gap-1"><span className="text-xs text-white/50 uppercase">Breakeven(s)</span><div className="flex gap-2 flex-wrap">{calculatedMetrics.breakevens.length > 0 ? calculatedMetrics.breakevens.map((be, i) => <span key={i} className="px-2 py-1 rounded bg-white/10 text-white font-mono text-sm border border-white/10">{formatCurrency(be)}</span>) : <span className="text-sm text-white/30 italic">--</span>}</div></div>
+              <div><div className="text-[9px] text-white/40 font-black uppercase mb-1">Custo de Montagem</div><div className={`text-3xl font-black ${metrics.cost > 0 ? 'text-red-400' : 'text-emerald-400'}`}>R$ {Math.abs(metrics.cost).toLocaleString('pt-BR', {minimumFractionDigits: 2})}</div></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><div className="text-[8px] text-white/30 font-black uppercase mb-1">Max Profit</div><div className="text-sm font-black text-emerald-400">{typeof metrics.maxProfit === 'number' ? `R$${metrics.maxProfit.toLocaleString()}` : metrics.maxProfit}</div></div>
+                <div className="bg-black/40 p-3 rounded-xl border border-white/5"><div className="text-[8px] text-white/30 font-black uppercase mb-1">Max Risk</div><div className="text-sm font-black text-red-400">{typeof metrics.maxLoss === 'number' ? `R$${Math.abs(metrics.maxLoss).toLocaleString()}` : metrics.maxLoss}</div></div>
+              </div>
+              <div className="bg-black/40 p-4 rounded-xl border border-white/10">
+                <div className="text-[9px] font-black text-blue-400 uppercase mb-4 flex items-center gap-2"><Zap size={10}/> Portfolio Sensitivities</div>
+                <div className="grid grid-cols-2 gap-4 text-[11px] font-mono">
+                  <div className="flex justify-between border-b border-white/5 pb-1"><span>Delta</span><span className="text-blue-300 font-black">{metrics.greeks.delta.toFixed(2)}</span></div>
+                  <div className="flex justify-between border-b border-white/5 pb-1"><span>Theta</span><span className={metrics.greeks.theta > 0 ? 'text-emerald-400' : 'text-red-400'}>{metrics.greeks.theta.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span>Gamma</span><span className="text-white/60">{metrics.greeks.gamma.toFixed(4)}</span></div>
+                  <div className="flex justify-between"><span>Vega</span><span className="text-purple-400">{metrics.greeks.vega.toFixed(2)}</span></div>
+                </div>
+              </div>
             </div>
           </Card>
 
-          <Card className="p-5 flex flex-col gap-4">
-             <div className="flex items-start gap-3"><Zap className="text-yellow-400 shrink-0 mt-1" size={18} /><div className="w-full"><h4 className="text-sm font-bold text-white mb-2 flex justify-between items-center"><span>Insight Operacional</span><span className="text-[10px] bg-white/10 px-2 py-0.5 rounded text-white/50 font-mono uppercase">{currentStrategyInfo?.category || "Custom"}</span></h4>{currentStrategyInfo ? (<div className="space-y-4 text-xs"><div className="bg-white/5 p-3 rounded-lg border border-white/5"><div className="text-blue-200/60 uppercase text-[10px] font-bold tracking-wider mb-1">Tese de Investimento</div><p className="text-white/90 leading-relaxed">{currentStrategyInfo.details.thesis}</p></div><div className="grid grid-cols-2 gap-3"><div className="bg-white/5 p-3 rounded-lg border border-white/5"><div className="text-blue-200/60 uppercase text-[10px] font-bold tracking-wider mb-1">Cenário Ideal</div><p className="text-white/80 leading-snug">{currentStrategyInfo.details.idealScenario}</p></div><div className="bg-white/5 p-3 rounded-lg border border-white/5"><div className="text-blue-200/60 uppercase text-[10px] font-bold tracking-wider mb-1">Perfil de Gregas</div><p className="text-emerald-300 font-mono text-[11px]">{currentStrategyInfo.details.greeks}</p></div></div><div><div className="text-blue-200/60 uppercase text-[10px] font-bold tracking-wider mb-1 flex items-center gap-1"><BookOpen size={10}/> Estrutura Mecânica</div><p className="text-white/60 leading-relaxed italic">{currentStrategyInfo.details.mechanics}</p></div></div>) : (<p className="text-xs text-white/50 italic">Estratégia personalizada. Analise o gráfico de Payoff para entender o risco/retorno.</p>)}</div></div>
+          {/* INSIGHTS DO MODELO SELECIONADO */}
+          <Card className="p-5 bg-slate-900/40 border-white/5">
+             <div className="flex items-center gap-2 mb-4 text-yellow-500"><BookOpen size={18}/><h4 className="text-[10px] font-black uppercase tracking-widest">Structural Insights</h4></div>
+             {currentStratInfo ? (
+               <div className="space-y-4">
+                 <div className="bg-black/30 p-3 rounded-lg text-[11px] leading-relaxed border-l-2 border-blue-500"><span className="text-blue-300 font-black uppercase block text-[9px] mb-1">Investment Thesis:</span> {currentStratInfo.details.thesis}</div>
+                 <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-black/30 p-2 rounded-lg"><div className="text-white/30 font-black uppercase text-[8px] mb-1">Scenario</div><div className="text-[10px] font-bold">{currentStratInfo.details.idealScenario}</div></div>
+                    <div className="bg-black/30 p-2 rounded-lg"><div className="text-white/30 font-black uppercase text-[8px] mb-1">Greeks Profile</div><div className="text-[10px] font-mono text-emerald-400 font-bold">{currentStratInfo.details.greeks}</div></div>
+                 </div>
+               </div>
+             ) : <div className="p-8 text-center text-white/10 text-[10px] font-black uppercase tracking-widest border-2 border-dashed border-white/5 rounded-xl">Custom Strategy Selection</div>}
           </Card>
 
-          <Card className="p-5 flex-1 flex flex-col justify-end min-h-[140px] relative overflow-hidden">
-             <Shield className={`absolute -right-6 -bottom-6 w-32 h-32 rotate-12 transition-colors duration-500 ${riskAnalysis.alertLevel === 'high' ? 'text-red-500/10' : 'text-emerald-500/10'}`} />
-             <div className="relative z-10 flex flex-col gap-3"><div className="flex justify-between items-start"><h4 className="text-sm font-bold text-white flex items-center gap-2">Controlo de Risco & Garantias</h4>{riskAnalysis.alertLevel === 'high' && <AlertTriangle className="text-red-400 animate-pulse" size={18} />}{riskAnalysis.alertLevel === 'medium' && <Lock className="text-yellow-400" size={18} />}{riskAnalysis.alertLevel === 'low' && <Unlock className="text-emerald-400" size={18} />}</div><div className="space-y-2"><div className="flex justify-between items-center text-xs border-b border-white/5 pb-2"><span className="text-white/50">Perfil de Risco</span><span className={`font-bold ${riskAnalysis.alertLevel === 'high' ? 'text-red-400' : 'text-white'}`}>{riskAnalysis.riskProfile}</span></div><div className="flex justify-between items-center text-xs pt-1"><span className="text-white/50">Chamada de Margem (Estimada)</span><div className="text-right"><div className={`font-bold ${riskAnalysis.alertLevel === 'low' ? 'text-emerald-400' : 'text-yellow-400'}`}>{riskAnalysis.marginValue}</div><div className="text-[10px] text-white/30">{riskAnalysis.marginType}</div></div></div></div></div>
+          {/* T-BOARD OPTION CHAIN */}
+          <Card className="flex-1 flex flex-col min-h-[420px] bg-[#0f172a]/80 border-white/5">
+             <div className="p-4 border-b border-white/5 bg-black/40">
+                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-200 mb-3 flex items-center gap-2"><LayoutGrid size={14}/> Market Option Board</h3>
+                {marketData ? (
+                  <div className="relative">
+                    <select value={selectedExpiry} onChange={(e) => setSelectedExpiration(e.target.value)} className="w-full bg-slate-800 border border-white/10 rounded-lg px-3 py-2 text-xs text-white outline-none font-black cursor-pointer appearance-none">
+                      {[...new Set(marketData.chain.map(o => o.expirationDate))].map(d => (
+                        <option key={d} value={d}>{new Date(d).toLocaleDateString('pt-BR')} ({marketData.chain.find(o => o.expirationDate === d)?.daysToMaturity} DTE)</option>
+                      ))}
+                    </select>
+                    <div className="absolute right-3 top-2 pointer-events-none opacity-40"><ChevronDown size={14}/></div>
+                  </div>
+                ) : <div className="p-4 text-center border-2 border-dashed border-white/5 rounded-lg text-[9px] font-black text-white/20">Aguardando Ticker...</div>}
+             </div>
+             <div className="overflow-y-auto flex-1 custom-scrollbar">
+                <table className="w-full text-[9px] font-mono text-center">
+                  <thead className="sticky top-0 bg-slate-900/95 z-20"><tr className="border-b border-white/10 text-white/40"><th className="py-2 text-emerald-400">CALL BID</th><th className="bg-slate-800 text-white px-2">STRK</th><th className="py-2 text-red-400">PUT ASK</th></tr></thead>
+                  <tbody className="divide-y divide-white/5">
+                    {tBoardData.map((row, i) => {
+                      const isATM = Math.abs(row.strike - spotPrice) < 0.3;
+                      return (
+                        <tr key={i} className={`hover:bg-blue-400/10 transition-colors ${isATM ? 'bg-blue-500/5' : ''}`}>
+                          <td className="p-0">
+                            <button onClick={() => addLegFromMarket(row.call, 'Sell')} className="w-full py-2 px-1 text-emerald-400/40 hover:text-emerald-400 transition-all">{row.call?.bid.toFixed(2) || '-'}</button>
+                          </td>
+                          <td className={`p-0 bg-slate-800/40 font-black ${isATM ? 'text-blue-300' : 'text-white/30'}`}>{row.strike.toFixed(2)}</td>
+                          <td className="p-0">
+                            <button onClick={() => addLegFromMarket(row.put, 'Buy')} className="w-full py-2 px-1 text-red-400/40 hover:text-red-400 transition-all">{row.put?.ask.toFixed(2) || '-'}</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+             </div>
           </Card>
         </div>
       </div>
 
-      {showLoadModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <Card className="w-full max-w-2xl max-h-[80vh] flex flex-col bg-[#111C2C]">
-            <div className="p-6 border-b border-white/10 flex justify-between items-center">
-              <h2 className="text-xl font-bold text-white">Simulações Guardadas</h2>
-              <button onClick={() => setShowLoadModal(false)} className="text-white/50 hover:text-white"><Plus className="rotate-45" /></button>
-            </div>
-            <div className="overflow-y-auto p-6 space-y-3">
-              {savedSimulations.length === 0 ? <div className="text-center text-white/40 py-8">Vazio...</div> : savedSimulations.map((sim, idx) => (
-                <div key={idx} onClick={() => loadSimulation(sim)} className="group flex justify-between items-center p-4 bg-white/5 hover:bg-white/10 rounded-lg cursor-pointer border border-transparent hover:border-blue-500/30 transition-all relative">
-                  <div>
-                    <h3 className="font-bold text-blue-200 group-hover:text-white transition-colors flex items-center gap-2">
-                      {sim.name}
-                      {new Date(sim.timestamp).getTime() > Date.now() - 60000 && <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 rounded">Novo</span>}
-                    </h3>
-                    <div className="text-xs text-white/50 mt-1 flex gap-3">
-                      <span>{new Date(sim.timestamp).toLocaleDateString('pt-BR')}</span>
-                      <span>Spot: {formatCurrency(parseFloat(sim.spot))}</span>
-                      <span>Lucro: <span className="text-green-400">{formatCurrency(parseFloat(sim.metrics.maxProfit))}</span></span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); loadSimulation(sim); }}
-                      className="p-2 text-white/30 hover:text-blue-400 transition-colors"
-                      title="Editar"
-                    >
-                      <Edit2 size={16} />
-                    </button>
-                    <button 
-                      onClick={(e) => deleteSimulation(sim.id, e)}
-                      className="p-2 text-white/30 hover:text-red-400 transition-colors"
-                      title="Excluir"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </Card>
-        </div>
-      )}
+      <style>{`.custom-scrollbar::-webkit-scrollbar { width: 4px; } .custom-scrollbar::-webkit-scrollbar-track { background: transparent; } .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; } .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }`}</style>
     </div>
   );
 }
