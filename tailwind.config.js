@@ -7,7 +7,16 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'sans-serif'],
+        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+      },
+      colors: {
+        terminal: {
+          canvas: '#090d16',
+          panel: '#0f1623',
+          elevated: '#161f30',
+          border: '#1f2b40',
+        },
       },
     },
   },

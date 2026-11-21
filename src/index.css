@@ -2,9 +2,94 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #111C2C;
-  color: white;
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: #090d16;
+    color: #f1f5f9;
+    margin: 0;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  /* Accessible focus indicators */
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid #38bdf8;
+    outline-offset: 2px;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom sleek scrollbar */
+.terminal-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.terminal-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.terminal-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 9999px;
+}
+
+.terminal-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.42);
+}
+
+/* Precision range slider for What-If simulations */
+input[type='range'].terminal-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 9999px;
+  background: #1e293b;
+  cursor: pointer;
+}
+
+input[type='range'].terminal-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 9999px;
+  background: #38bdf8;
+  border: 2px solid #090d16;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.35);
+  transition: transform 0.12s ease, background-color 0.12s ease;
+}
+
+input[type='range'].terminal-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+  background: #7dd3fc;
+}
+
+input[type='range'].terminal-slider::-moz-range-thumb {
+  height: 16px;
+  width: 16px;
+  border-radius: 9999px;
+  background: #38bdf8;
+  border: 2px solid #090d16;
+  cursor: pointer;
+}
+
+/* Remove ugly default number input spinners where compact layout is needed */
+input[type='number'].no-spinner::-webkit-inner-spin-button,
+input[type='number'].no-spinner::-webkit-outer-spin-button {
+  -webkit-appearance: none;
   margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+input[type='number'].no-spinner {
+  -moz-appearance: textfield;
 }
