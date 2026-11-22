@@ -5,7 +5,8 @@ import {
   MarketParams,
   StrategyTemplate,
 } from '../types/options';
-import { bsmGreeks, bsmPrice } from './blackScholes';
+import { greeksOption, priceOption } from './americanPricing';
+import { getContinuousMarketRates, inferDefaultB3ExerciseStyle } from './blackScholes';
 import {
   generateB3OptionTicker,
   getTimeToMaturityYears,
@@ -908,6 +909,104 @@ export const STRATEGIES: StrategyTemplate[] = [
       { type: 'Call', action: 'Sell', moneyness: 1.05, quantity: 100 },
     ],
   },
+  // MULTI-EXPIRY: CALENDAR & DIAGONAL (46-50)
+  {
+    id: 'call-calendar-spread',
+    code: 46,
+    name: 'Trava Calendário com Call (Horizontal)',
+    category: 'Income',
+    riskProfile: 'Definido',
+    complexity: 'Intermediário',
+    description: 'Venda de Call no vencimento curto + compra de Call no mesmo strike no vencimento longo.',
+    details: {
+      thesis: 'Capturar o decaimento mais acelerado do Theta no vencimento curto e eventual alta de IV na ponta longa.',
+      mechanics: 'Vende Call ATM do mês atual e compra Call ATM do mês seguinte com risco travado ao débito.',
+      idealScenario: 'Ativo encerra próximo ao strike central no vencimento mais curto.',
+      greeks: 'Delta Neutro, Theta +, Vega + (curva longa)',
+    },
+    legSpecs: [
+      { type: 'Call', action: 'Sell', moneyness: 1.0, quantity: 100, expiryOffsetMonths: 0 },
+      { type: 'Call', action: 'Buy', moneyness: 1.0, quantity: 100, expiryOffsetMonths: 1 },
+    ],
+  },
+  {
+    id: 'put-calendar-spread',
+    code: 47,
+    name: 'Trava Calendário com Put (Horizontal)',
+    category: 'Income',
+    riskProfile: 'Definido',
+    complexity: 'Intermediário',
+    description: 'Venda de Put no vencimento curto + compra de Put no mesmo strike no vencimento seguinte.',
+    details: {
+      thesis: 'Coletar diferencial de Theta em região de suporte aproveitando o skew de Puts.',
+      mechanics: 'Vende Put levemente OTM/ATM curta e compra Put no mesmo strike no vencimento posterior.',
+      idealScenario: 'Ativo estabiliza próximo ao strike escolhido até o primeiro vencimento.',
+      greeks: 'Theta +, Vega +, Risco Definido ao Débito',
+    },
+    legSpecs: [
+      { type: 'Put', action: 'Sell', moneyness: 0.98, quantity: 100, expiryOffsetMonths: 0 },
+      { type: 'Put', action: 'Buy', moneyness: 0.98, quantity: 100, expiryOffsetMonths: 1 },
+    ],
+  },
+  {
+    id: 'pmcc-diagonal-bull',
+    code: 48,
+    name: 'Trava Diagonal de Alta (PMCC)',
+    category: 'Bullish',
+    riskProfile: 'Definido',
+    complexity: 'Intermediário',
+    description: 'Compra de Call longa ITM financiada por venda de Call curta OTM (Lançamento Coberto Sintético).',
+    details: {
+      thesis: 'Replicar um financiamento/lançamento coberto utilizando muito menos capital que comprar o ativo.',
+      mechanics: 'Compra Call ITM no vencimento longo (Delta alto) e vende Call OTM no vencimento curto.',
+      idealScenario: 'Alta moderada até o strike da Call vendida no primeiro vencimento, permitindo rolagens.',
+      greeks: 'Delta +, Theta +, Vega +, Baixo Desembolso',
+    },
+    legSpecs: [
+      { type: 'Call', action: 'Buy', moneyness: 0.92, quantity: 100, expiryOffsetMonths: 1 },
+      { type: 'Call', action: 'Sell', moneyness: 1.04, quantity: 100, expiryOffsetMonths: 0 },
+    ],
+  },
+  {
+    id: 'pmcp-diagonal-bear',
+    code: 49,
+    name: 'Trava Diagonal de Baixa (PMCP)',
+    category: 'Bearish',
+    riskProfile: 'Definido',
+    complexity: 'Intermediário',
+    description: 'Compra de Put longa ITM financiada por venda de Put curta OTM.',
+    details: {
+      thesis: 'Exposição baixista com financiamento via Theta e menor sensibilidade ao tempo que Put a seco.',
+      mechanics: 'Compra Put ITM no vencimento seguinte e vende Put OTM no vencimento atual.',
+      idealScenario: 'Queda gradual do ativo até o strike da Put curta no primeiro vencimento.',
+      greeks: 'Delta -, Theta +, Vega +, Risco Definido',
+    },
+    legSpecs: [
+      { type: 'Put', action: 'Buy', moneyness: 1.08, quantity: 100, expiryOffsetMonths: 1 },
+      { type: 'Put', action: 'Sell', moneyness: 0.96, quantity: 100, expiryOffsetMonths: 0 },
+    ],
+  },
+  {
+    id: 'double-calendar',
+    code: 50,
+    name: 'Double Calendar (Calendário Duplo)',
+    category: 'Volatility',
+    riskProfile: 'Definido',
+    complexity: 'Avançado',
+    description: 'Calendário simultâneo de Put OTM e Call OTM criando ampla faixa de lucro lateral.',
+    details: {
+      thesis: 'Mercado lateralizado em faixa ampla com expectativa de expansão de volatilidade implícita.',
+      mechanics: 'Vende Strangle OTM no vencimento curto e compra Strangle nos mesmos strikes no vencimento longo.',
+      idealScenario: 'Ativo permanece entre os dois strikes até o vencimento curto.',
+      greeks: 'Delta Neutro, Theta +, Vega ++, Risco Definido',
+    },
+    legSpecs: [
+      { type: 'Put', action: 'Sell', moneyness: 0.95, quantity: 100, expiryOffsetMonths: 0 },
+      { type: 'Put', action: 'Buy', moneyness: 0.95, quantity: 100, expiryOffsetMonths: 1 },
+      { type: 'Call', action: 'Sell', moneyness: 1.05, quantity: 100, expiryOffsetMonths: 0 },
+      { type: 'Call', action: 'Buy', moneyness: 1.05, quantity: 100, expiryOffsetMonths: 1 },
+    ],
+  },
 ];
 
 /**
@@ -934,9 +1033,52 @@ function findClosestMarketOption(
 }
 
 /**
+ * Resolves the target expiration date and DTE for a given `expiryOffsetMonths` (0 = near, 1 = next, etc.).
+ */
+function resolveExpiryForOffset(
+  offsetMonths: number,
+  selectedExpiry: string,
+  marketData: MarketDataResponse | null,
+  fallbackExpiries: { date: string; calendarDays: number }[]
+): { expirationDate: string; dte: number } {
+  const safeOffset = Math.max(0, offsetMonths);
+
+  if (marketData && marketData.chain.length > 0) {
+    const uniqueExps = Array.from(
+      new Map(marketData.chain.map((o) => [o.expirationDate, o.daysToMaturity])).entries()
+    )
+      .map(([date, dte]) => ({ date, dte }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    if (uniqueExps.length > 0) {
+      const baseIdx = selectedExpiry
+        ? Math.max(0, uniqueExps.findIndex((e) => e.date === selectedExpiry))
+        : 0;
+      const targetIdx = Math.min(uniqueExps.length - 1, baseIdx + safeOffset);
+      if (targetIdx > baseIdx || safeOffset === 0) {
+        return {
+          expirationDate: uniqueExps[targetIdx].date,
+          dte: uniqueExps[targetIdx].dte,
+        };
+      }
+    }
+  }
+
+  // Fallback to generated B3 upcoming expiries
+  const baseIdx = selectedExpiry
+    ? Math.max(0, fallbackExpiries.findIndex((e) => e.date === selectedExpiry))
+    : 0;
+  const target = fallbackExpiries[Math.min(fallbackExpiries.length - 1, baseIdx + safeOffset)];
+  return {
+    expirationDate: target.date,
+    dte: target.calendarDays,
+  };
+}
+
+/**
  * Instantiates a strategy template into real, dynamically priced Legs.
- * - Uses synced B3 chain strikes, tickers, IVs, and Bid/Ask when available.
- * - Falls back to realistic B3 strike rounding + Black-Scholes pricing when offline.
+ * - Resolves multi-expiry offsets (Calendar / Diagonal) cleanly from chain or B3 schedule.
+ * - Applies continuous B3 rates (ln(1+r)) and default B3 American/European exercise styles.
  */
 export function instantiateStrategy(
   template: StrategyTemplate,
@@ -945,12 +1087,10 @@ export function instantiateStrategy(
   marketData: MarketDataResponse | null,
   selectedExpiry: string
 ): Leg[] {
-  const fallbackExpiries = getUpcomingB3Expiries(2);
-  const defaultExpiry = selectedExpiry || fallbackExpiries[0].date;
-  const defaultDte =
-    marketData?.chain.find((o) => o.expirationDate === defaultExpiry)?.daysToMaturity ||
-    fallbackExpiries[0].calendarDays;
+  const fallbackExpiries = getUpcomingB3Expiries(4);
+  const nearResolved = resolveExpiryForOffset(0, selectedExpiry, marketData, fallbackExpiries);
   const defaultIv = 0.34;
+  const { rCont, qCont } = getContinuousMarketRates(marketParams);
 
   return template.legSpecs.map((spec) => {
     if (spec.type === 'Stock') {
@@ -962,8 +1102,8 @@ export function instantiateStrategy(
         strike: Number(marketParams.spotPrice.toFixed(2)),
         quantity: spec.quantity,
         price: Number(marketParams.spotPrice.toFixed(2)),
-        expirationDate: defaultExpiry,
-        daysToMaturity: defaultDte,
+        expirationDate: nearResolved.expirationDate,
+        daysToMaturity: nearResolved.dte,
         impliedVolatility: 0,
         enabled: true,
         delta: 1,
@@ -974,12 +1114,16 @@ export function instantiateStrategy(
       };
     }
 
+    const offset = spec.expiryOffsetMonths ?? 0;
+    const legExp = resolveExpiryForOffset(offset, selectedExpiry, marketData, fallbackExpiries);
     const targetStrike = marketParams.spotPrice * spec.moneyness;
+    const exerciseStyle = inferDefaultB3ExerciseStyle(spec.type, ticker);
+
     const match = marketData
-      ? findClosestMarketOption(marketData.chain, spec.type, targetStrike, defaultExpiry)
+      ? findClosestMarketOption(marketData.chain, spec.type, targetStrike, legExp.expirationDate)
       : undefined;
 
-    if (match) {
+    if (match && (offset === 0 || match.expirationDate === legExp.expirationDate)) {
       const marketPrice =
         spec.action === 'Buy'
           ? match.ask > 0
@@ -989,29 +1133,36 @@ export function instantiateStrategy(
           ? match.bid
           : match.last || match.ask;
 
-      const T = getTimeToMaturityYears(match.daysToMaturity, marketParams.dayCountConvention);
+      const legStyle = match.exerciseStyle ?? exerciseStyle;
+      const T = getTimeToMaturityYears(
+        match.daysToMaturity,
+        marketParams.dayCountConvention,
+        match.expirationDate
+      );
       const iv = match.impliedVolatility > 0 ? match.impliedVolatility : defaultIv;
       const safePrice =
         marketPrice > 0
           ? marketPrice
-          : bsmPrice({
+          : priceOption({
               S: marketParams.spotPrice,
               K: match.strike,
               T,
-              r: marketParams.riskFreeRate,
-              q: marketParams.dividendYield,
+              r: rCont,
+              q: qCont,
               sigma: iv,
               type: spec.type,
+              exerciseStyle: legStyle,
             });
-      const greeks = bsmGreeks(
+      const greeks = greeksOption(
         {
           S: marketParams.spotPrice,
           K: match.strike,
           T,
-          r: marketParams.riskFreeRate,
-          q: marketParams.dividendYield,
+          r: rCont,
+          q: qCont,
           sigma: iv,
           type: spec.type,
+          exerciseStyle: legStyle,
         },
         marketParams.dayCountConvention
       );
@@ -1021,6 +1172,7 @@ export function instantiateStrategy(
         ticker: match.ticker,
         type: spec.type,
         action: spec.action,
+        exerciseStyle: legStyle,
         strike: match.strike,
         quantity: spec.quantity,
         price: Number(safePrice.toFixed(2)),
@@ -1035,41 +1187,48 @@ export function instantiateStrategy(
       };
     }
 
-    // Offline / BSM synthetic pricing
+    // Offline / synthetic pricing (also handles far-month calendar legs when chain only has 1 expiry)
     const strike = roundToB3Strike(targetStrike);
-    const T = getTimeToMaturityYears(defaultDte, marketParams.dayCountConvention);
-    const theoPrice = bsmPrice({
+    const T = getTimeToMaturityYears(
+      legExp.dte,
+      marketParams.dayCountConvention,
+      legExp.expirationDate
+    );
+    const theoPrice = priceOption({
       S: marketParams.spotPrice,
       K: strike,
       T,
-      r: marketParams.riskFreeRate,
-      q: marketParams.dividendYield,
+      r: rCont,
+      q: qCont,
       sigma: defaultIv,
       type: spec.type,
+      exerciseStyle,
     });
-    const greeks = bsmGreeks(
+    const greeks = greeksOption(
       {
         S: marketParams.spotPrice,
         K: strike,
         T,
-        r: marketParams.riskFreeRate,
-        q: marketParams.dividendYield,
+        r: rCont,
+        q: qCont,
         sigma: defaultIv,
         type: spec.type,
+        exerciseStyle,
       },
       marketParams.dayCountConvention
     );
 
     return {
       id: generateLegId(),
-      ticker: generateB3OptionTicker(ticker || 'PETR4', spec.type, defaultExpiry, strike),
+      ticker: generateB3OptionTicker(ticker || 'PETR4', spec.type, legExp.expirationDate, strike),
       type: spec.type,
       action: spec.action,
+      exerciseStyle,
       strike,
       quantity: spec.quantity,
       price: Number(Math.max(0.02, theoPrice).toFixed(2)),
-      expirationDate: defaultExpiry,
-      daysToMaturity: defaultDte,
+      expirationDate: legExp.expirationDate,
+      daysToMaturity: legExp.dte,
       impliedVolatility: defaultIv,
       enabled: true,
       ...greeks,

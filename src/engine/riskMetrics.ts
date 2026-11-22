@@ -1,13 +1,17 @@
 import {
   CostConfig,
+  IvShockMode,
   Leg,
+  MarketOption,
   MarketParams,
   RiskAlert,
   StrategyMetrics,
 } from '../types/options';
-import { probabilitySpotAbove } from './blackScholes';
+import { getContinuousMarketRates, probabilitySpotAbove } from './blackScholes';
 import { getTimeToMaturityYears } from './calendar';
+import { evaluateCoreMarginProxy } from './marginCore';
 import {
+  calculateCostBreakdown,
   calculateOperationalCosts,
   evaluatePortfolioGreeks,
   evaluateStrategyPnl,
@@ -17,70 +21,24 @@ import {
 } from './payoff';
 
 /**
- * Estimates conservative B3 margin / collateral requirement (CORE proxy) for retail traders.
+ * Estimates conservative B3 margin / collateral requirement via the 2D Stress CORE Proxy.
  */
 export function estimateB3Margin(
   legs: Leg[],
-  spotPrice: number,
-  netCost: number,
-  maxLoss: number | 'Ilimitado'
+  marketParamsOrSpot: MarketParams | number,
+  netCost: number
 ): number {
-  const active = getActiveLegs(legs);
-  if (active.length === 0) return 0;
-
-  // Calculate stock position capital commitment
-  let netStockShares = 0;
-  let stockCapital = 0;
-  for (const leg of active) {
-    if (leg.type === 'Stock') {
-      if (leg.action === 'Buy') {
-        netStockShares += leg.quantity;
-        stockCapital += leg.quantity * leg.price;
-      } else {
-        netStockShares -= leg.quantity;
-        stockCapital += leg.quantity * leg.price * 1.2; // short stock borrow + collateral
-      }
-    }
-  }
-
-  // If strategy has strictly defined maximum loss
-  if (typeof maxLoss === 'number') {
-    const lossRequirement = maxLoss < 0 ? Math.abs(maxLoss) : 0;
-    const debitRequirement = netCost > 0 ? netCost : 0;
-    return Math.max(lossRequirement, debitRequirement, stockCapital);
-  }
-
-  // Unlimited risk (uncovered short calls / short ratios): apply conservative B3 CORE proxy
-  let remainingCoveredShares = Math.max(0, netStockShares);
-  let uncoveredMargin = 0;
-
-  for (const leg of active) {
-    if (leg.action !== 'Sell' || leg.type === 'Stock') continue;
-
-    let qtyToCover = leg.quantity;
-    if (leg.type === 'Call' && remainingCoveredShares > 0) {
-      const covered = Math.min(remainingCoveredShares, qtyToCover);
-      remainingCoveredShares -= covered;
-      qtyToCover -= covered;
-    }
-
-    if (qtyToCover <= 0) continue;
-
-    if (leg.type === 'Call') {
-      const otm = Math.max(0, leg.strike - spotPrice);
-      const perShare = Math.max(0.2 * spotPrice - otm, 0.1 * spotPrice) + leg.price;
-      uncoveredMargin += perShare * qtyToCover;
-    } else {
-      const otm = Math.max(0, spotPrice - leg.strike);
-      const perShare = Math.min(
-        leg.strike,
-        Math.max(0.2 * spotPrice - otm, 0.1 * leg.strike) + leg.price
-      );
-      uncoveredMargin += perShare * qtyToCover;
-    }
-  }
-
-  return Math.max(uncoveredMargin + stockCapital, netCost > 0 ? netCost : 0);
+  const mp: MarketParams =
+    typeof marketParamsOrSpot === 'number'
+      ? {
+          spotPrice: marketParamsOrSpot,
+          riskFreeRate: 0.1425,
+          dividendYield: 0,
+          borrowRate: 0.005,
+          dayCountConvention: 'du252',
+        }
+      : marketParamsOrSpot;
+  return evaluateCoreMarginProxy(legs, mp, netCost).totalCapitalRequired;
 }
 
 /**
@@ -92,7 +50,7 @@ function buildRiskAlerts(
   maxLoss: number | 'Ilimitado',
   nearestDte: number,
   isMultiExpiry: boolean,
-  dividendYield: number
+  effectiveCarryYield: number
 ): RiskAlert[] {
   const alerts: RiskAlert[] = [];
 
@@ -132,7 +90,12 @@ function buildRiskAlerts(
   }
 
   const earlyExerciseCalls = activeLegs.filter(
-    (l) => l.type === 'Call' && l.action === 'Sell' && l.strike < spotPrice * 0.99 && dividendYield > 0.01
+    (l) =>
+      l.type === 'Call' &&
+      l.action === 'Sell' &&
+      (l.exerciseStyle ?? 'American') === 'American' &&
+      l.strike < spotPrice * 0.99 &&
+      effectiveCarryYield > 0.01
   );
   if (earlyExerciseCalls.length > 0) {
     alerts.push({
@@ -140,7 +103,7 @@ function buildRiskAlerts(
       severity: 'warning',
       title: 'Risco de Exercício Antecipado (Call Americana)',
       description:
-        'Calls vendidas ITM na B3 podem ser exercidas antecipadamente próximas a datas-ex de dividendos/JCP.',
+        'Calls americanas vendidas ITM podem sofrer exercício antecipado quando há custo de carregamento/proventos não ajustados relevante.',
     });
   }
 
@@ -150,7 +113,7 @@ function buildRiskAlerts(
       severity: 'info',
       title: 'Estrutura Multi-Vencimento (Calendário/Diagonal)',
       description:
-        'Payoff e métricas são projetados no vencimento mais curto, precificando as pernas longas via Black-Scholes.',
+        'Payoff e métricas são projetados no vencimento mais curto, precificando as pernas longas pelo motor B3 (BSM/Americano).',
     });
   }
 
@@ -158,15 +121,51 @@ function buildRiskAlerts(
 }
 
 /**
- * Computes exact analytical risk metrics, Breakevens, Probability of Profit (PoP),
- * Return on Risk (RoR), estimated B3 margin, and portfolio Greeks.
+ * Resolves the best IV to evaluate spot probability at a given threshold:
+ * prefers nearest-expiry market chain skew interpolation if available,
+ * otherwise uses quantity-weighted IV of nearest-expiry strategy legs.
+ */
+function resolveIvAtThreshold(
+  threshold: number,
+  nearestLegs: Leg[],
+  fallbackIv: number,
+  ivShiftPercent: number,
+  nearestExpiryDate: string | undefined,
+  marketChain?: MarketOption[]
+): number {
+  let baseIv = fallbackIv;
+
+  if (marketChain && marketChain.length > 0 && nearestExpiryDate) {
+    const sameExp = marketChain
+      .filter((o) => o.expirationDate === nearestExpiryDate && o.impliedVolatility > 0)
+      .sort((a, b) => Math.abs(a.strike - threshold) - Math.abs(b.strike - threshold));
+    if (sameExp.length > 0) {
+      baseIv = sameExp[0].impliedVolatility;
+    }
+  } else if (nearestLegs.length > 0) {
+    const closest = nearestLegs.reduce((best, curr) =>
+      Math.abs(curr.strike - threshold) < Math.abs(best.strike - threshold) ? curr : best
+    );
+    if (closest.impliedVolatility > 0) {
+      baseIv = closest.impliedVolatility;
+    }
+  }
+
+  return Math.max(0.01, baseIv + ivShiftPercent / 100);
+}
+
+/**
+ * Computes exact analytical risk metrics, Breakevens, calibrated Probability of Profit (PoP),
+ * Return on Risk (RoR), 2D Stress CORE Proxy Margin, complete B3 costs, and 1st/2nd order Greeks.
  */
 export function calculateStrategyMetrics(
   legs: Leg[],
   marketParams: MarketParams,
   costConfig: CostConfig,
   ivShiftPercent = 0,
-  daysElapsed = 0
+  daysElapsed = 0,
+  ivShockMode: IvShockMode = 'parallel',
+  marketChain?: MarketOption[]
 ): StrategyMetrics {
   const active = getActiveLegs(legs);
   const nearestDte = getNearestDte(active);
@@ -176,14 +175,22 @@ export function calculateStrategyMetrics(
     return {
       netCost: 0,
       operationalCosts: 0,
+      costBreakdown: { entryCosts: 0, estimatedExitOrExerciseCosts: 0, irrfInformative: 0 },
       maxProfit: 0,
       maxLoss: 0,
       breakevens: [],
       pop: null,
       ror: null,
       estimatedMargin: 0,
+      marginBreakdown: {
+        initialCashRequired: 0,
+        coreMarginRequired: 0,
+        totalCapitalRequired: 0,
+        bindingScenario: null,
+        scenariosEvaluated: 0,
+      },
       notionalDelta: 0,
-      greeks: { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 },
+      greeks: { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0, vanna: 0, volga: 0, charm: 0 },
       alerts: [],
       isMultiExpiry: false,
       nearestDte: 30,
@@ -201,6 +208,13 @@ export function calculateStrategyMetrics(
   }
 
   const operationalCosts = calculateOperationalCosts(active, costConfig);
+  const costBreakdown = calculateCostBreakdown(
+    active,
+    marketParams,
+    costConfig,
+    ivShiftPercent,
+    ivShockMode
+  );
 
   // Build exact evaluation domain covering 0, all strikes, and asymptotic upper bound
   const strikes = active
@@ -212,7 +226,6 @@ export function calculateStrategyMetrics(
   const sampleSet = new Set<number>([0, marketParams.spotPrice, upperBound]);
   for (const k of strikes) sampleSet.add(k);
 
-  // Dense grid ensures accuracy even for smooth multi-expiry (Calendar/Diagonal) curves
   const denseSteps = 300;
   for (let i = 1; i < denseSteps; i++) {
     sampleSet.add((upperBound * i) / denseSteps);
@@ -221,7 +234,15 @@ export function calculateStrategyMetrics(
   const sortedSpots = Array.from(sampleSet).sort((a, b) => a - b);
   const evaluated = sortedSpots.map((spot) => ({
     spot,
-    pnl: evaluateStrategyPnl(active, spot, nearestDte, ivShiftPercent, marketParams, costConfig),
+    pnl: evaluateStrategyPnl(
+      active,
+      spot,
+      nearestDte,
+      ivShiftPercent,
+      marketParams,
+      costConfig,
+      ivShockMode
+    ),
   }));
 
   let maxProfitVal = -Infinity;
@@ -244,7 +265,6 @@ export function calculateStrategyMetrics(
     if (Math.abs(p0.pnl) < 1e-4 && p0.spot > 0) {
       breakevens.push(Number(p0.spot.toFixed(2)));
     } else if (p0.pnl * p1.pnl < 0) {
-      // Linear interpolation + 1-step bisection check
       const t = -p0.pnl / (p1.pnl - p0.pnl);
       const cross = p0.spot + t * (p1.spot - p0.spot);
       breakevens.push(Number(cross.toFixed(2)));
@@ -254,20 +274,34 @@ export function calculateStrategyMetrics(
   // Deduplicate close breakevens (within R$ 0.05)
   const uniqueBreakevens: number[] = [];
   for (const be of breakevens.sort((a, b) => a - b)) {
-    if (uniqueBreakevens.length === 0 || Math.abs(be - uniqueBreakevens[uniqueBreakevens.length - 1]) > 0.05) {
+    if (
+      uniqueBreakevens.length === 0 ||
+      Math.abs(be - uniqueBreakevens[uniqueBreakevens.length - 1]) > 0.05
+    ) {
       uniqueBreakevens.push(be);
     }
   }
 
-  // Probability of Profit (PoP) via log-normal BSM integration across profitable intervals
+  // Calibrated Probability of Profit (PoP): uses ONLY nearest-expiry IV (plus skew lookup when available)
   const optionLegs = active.filter((l) => l.type !== 'Stock');
-  const totalQty = optionLegs.reduce((sum, l) => sum + l.quantity, 0);
-  const avgIv =
+  const nearestOptions = optionLegs.filter((l) => Math.max(1, l.daysToMaturity) === nearestDte);
+  const ivSourceLegs = nearestOptions.length > 0 ? nearestOptions : optionLegs;
+  const nearestExpiryDate = ivSourceLegs[0]?.expirationDate;
+
+  const totalQty = ivSourceLegs.reduce((sum, l) => sum + l.quantity, 0);
+  const fallbackIv =
     totalQty > 0
-      ? optionLegs.reduce((sum, l) => sum + (l.impliedVolatility || 0.35) * l.quantity, 0) / totalQty
+      ? ivSourceLegs.reduce((sum, l) => sum + (l.impliedVolatility || 0.35) * l.quantity, 0) /
+        totalQty
       : 0.35;
-  const effectiveIv = Math.max(0.01, avgIv + ivShiftPercent / 100);
-  const T = getTimeToMaturityYears(nearestDte, marketParams.dayCountConvention);
+
+  const T = getTimeToMaturityYears(
+    nearestDte,
+    marketParams.dayCountConvention,
+    nearestExpiryDate
+  );
+  const { rCont, qCont } = getContinuousMarketRates(marketParams);
+  const zeroDrift = marketParams.popDriftMode === 'zero';
 
   const boundaries = [0, ...uniqueBreakevens, Infinity];
   let popProb = 0;
@@ -285,7 +319,8 @@ export function calculateStrategyMetrics(
       nearestDte,
       ivShiftPercent,
       marketParams,
-      costConfig
+      costConfig,
+      ivShockMode
     );
 
     if (testPnl > 0) {
@@ -296,9 +331,17 @@ export function calculateStrategyMetrics(
               marketParams.spotPrice,
               low,
               T,
-              marketParams.riskFreeRate,
-              marketParams.dividendYield,
-              effectiveIv
+              rCont,
+              qCont,
+              resolveIvAtThreshold(
+                low,
+                ivSourceLegs,
+                fallbackIv,
+                ivShiftPercent,
+                nearestExpiryDate,
+                marketChain
+              ),
+              zeroDrift
             );
       const pAboveHigh =
         high === Infinity
@@ -307,24 +350,35 @@ export function calculateStrategyMetrics(
               marketParams.spotPrice,
               high,
               T,
-              marketParams.riskFreeRate,
-              marketParams.dividendYield,
-              effectiveIv
+              rCont,
+              qCont,
+              resolveIvAtThreshold(
+                high,
+                ivSourceLegs,
+                fallbackIv,
+                ivShiftPercent,
+                nearestExpiryDate,
+                marketChain
+              ),
+              zeroDrift
             );
       popProb += Math.max(0, pAboveLow - pAboveHigh);
     }
   }
 
   const pop = Number((Math.min(1, Math.max(0, popProb)) * 100).toFixed(1));
-  const estimatedMargin = Number(
-    estimateB3Margin(active, marketParams.spotPrice, netCost, maxLoss).toFixed(2)
-  );
 
-  // Return on Risk (RoR): MaxProfit / Capital at Risk (or Estimated Margin)
+  // 2D Closeout Stress Proxy CORE Margin
+  const marginBreakdown = evaluateCoreMarginProxy(active, marketParams, netCost);
+  const estimatedMargin = marginBreakdown.totalCapitalRequired;
+
+  // Return on Risk (RoR): MaxProfit / Capital at Risk (or CORE Margin)
   let ror: number | null = null;
   if (typeof maxProfit === 'number' && maxProfit > 0) {
     const riskDenom =
-      typeof maxLoss === 'number' && maxLoss < 0 ? Math.abs(maxLoss) : estimatedMargin;
+      typeof maxLoss === 'number' && maxLoss < 0
+        ? Math.min(Math.abs(maxLoss), Math.max(estimatedMargin, Math.abs(maxLoss)))
+        : estimatedMargin;
     if (riskDenom > 0) {
       ror = Number(((maxProfit / riskDenom) * 100).toFixed(1));
     }
@@ -335,7 +389,8 @@ export function calculateStrategyMetrics(
     marketParams.spotPrice,
     daysElapsed,
     ivShiftPercent,
-    marketParams
+    marketParams,
+    ivShockMode
   );
   const notionalDelta = Number((greeks.delta * marketParams.spotPrice).toFixed(2));
 
@@ -345,18 +400,20 @@ export function calculateStrategyMetrics(
     maxLoss,
     nearestDte,
     multiExpiry,
-    marketParams.dividendYield
+    marketParams.dividendYield + (marketParams.borrowRate ?? 0)
   );
 
   return {
     netCost: Number(netCost.toFixed(2)),
     operationalCosts: Number(operationalCosts.toFixed(2)),
+    costBreakdown,
     maxProfit,
     maxLoss,
     breakevens: uniqueBreakevens,
     pop,
     ror,
     estimatedMargin,
+    marginBreakdown,
     notionalDelta,
     greeks,
     alerts,

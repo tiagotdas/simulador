@@ -11,7 +11,7 @@ interface StrategyExplorerModalProps {
 }
 
 const CATEGORY_LABELS: Record<StrategyCategory | 'ALL', string> = {
-  ALL: 'Todas (45)',
+  ALL: `Todas (${STRATEGIES.length})`,
   Bullish: 'Alta (Bullish)',
   Bearish: 'Baixa (Bearish)',
   Volatility: 'Volatilidade',
@@ -31,12 +31,13 @@ function StrategySparkline({ template }: { template: StrategyTemplate }) {
     let val = 0;
     for (const leg of template.legSpecs) {
       const k = spot * leg.moneyness;
+      const timeBonus = (leg.expiryOffsetMonths ?? 0) * 1.4;
       const intrinsic =
         leg.type === 'Stock'
           ? s - spot
           : leg.type === 'Call'
-          ? Math.max(0, s - k) - Math.max(0, spot - k) * 0.7 - 2.5
-          : Math.max(0, k - s) - Math.max(0, k - spot) * 0.7 - 2.5;
+          ? Math.max(0, s - k) + timeBonus * Math.exp(-Math.pow((s - k) / 14, 2)) - Math.max(0, spot - k) * 0.7 - 2.5 - timeBonus * 0.5
+          : Math.max(0, k - s) + timeBonus * Math.exp(-Math.pow((s - k) / 14, 2)) - Math.max(0, k - spot) * 0.7 - 2.5 - timeBonus * 0.5;
       const dir = leg.action === 'Buy' ? 1 : -1;
       val += dir * intrinsic * (leg.quantity / 100);
     }
@@ -111,10 +112,10 @@ export const StrategyExplorerModal: React.FC<StrategyExplorerModalProps> = ({
             <BookOpen size={18} className="text-sky-400" />
             <div>
               <h2 id="strategy-explorer-title" className="text-base font-bold text-slate-100">
-                Catálogo de Estratégias de Opções (45 Modelos)
+                Catálogo de Estratégias de Opções ({STRATEGIES.length} Modelos)
               </h2>
               <p className="text-xs text-slate-400">
-                Strikes e prêmios são calibrados automaticamente na grade sincronizada ou via Black-Scholes
+                Inclui estruturas multi-vencimento (Calendário e Diagonais) calibradas na grade B3 ou via motor americano/BSM
               </p>
             </div>
           </div>

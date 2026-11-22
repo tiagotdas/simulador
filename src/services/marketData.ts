@@ -1,6 +1,7 @@
 import { MarketDataResponse, MarketOption, MarketParams } from '../types/options';
-import { bsmGreeks, solveImpliedVolatility } from '../engine/blackScholes';
-import { getTimeToMaturityYears } from '../engine/calendar';
+import { greeksOption, solveOptionImpliedVolatility } from '../engine/americanPricing';
+import { getContinuousMarketRates, inferDefaultB3ExerciseStyle } from '../engine/blackScholes';
+import { getTimeToMaturityYears, resolveDynamicDte } from '../engine/calendar';
 import { generateRealisticB3Chain } from './mockMarketData';
 
 const DEFAULT_GAS_URL =
@@ -20,6 +21,7 @@ const memoryCache = new Map<string, CacheEntry>();
 
 function normalizeOption(
   raw: Record<string, unknown>,
+  underlying: string,
   spotPrice: number,
   marketParams: MarketParams
 ): MarketOption | null {
@@ -34,44 +36,55 @@ function normalizeOption(
   const strike = Number(raw.strike);
   if (!type || !Number.isFinite(strike) || strike <= 0) return null;
 
-  const daysToMaturity = Math.max(1, Number(raw.daysToMaturity) || 21);
   const expirationDate = String(raw.expirationDate || '');
+  const rawDte = Math.max(1, Number(raw.daysToMaturity) || 21);
+  const daysToMaturity = Math.max(1, resolveDynamicDte(expirationDate, rawDte));
   const bid = Math.max(0, Number(raw.bid) || 0);
   const ask = Math.max(0, Number(raw.ask) || 0);
   const last = Math.max(0, Number(raw.last) || (bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask));
 
+  const styleRaw = String(raw.exerciseStyle || raw.style || '').toLowerCase();
+  const exerciseStyle =
+    styleRaw === 'american' || styleRaw === 'americana' || styleRaw === 'a'
+      ? 'American'
+      : styleRaw === 'european' || styleRaw === 'europeia' || styleRaw === 'e'
+      ? 'European'
+      : inferDefaultB3ExerciseStyle(type, underlying);
+
+  const { rCont, qCont } = getContinuousMarketRates(marketParams);
+  const T = getTimeToMaturityYears(daysToMaturity, marketParams.dayCountConvention, expirationDate);
+
   let iv = Number(raw.impliedVolatility);
   if (!Number.isFinite(iv) || iv <= 0) {
-    const T = getTimeToMaturityYears(daysToMaturity, marketParams.dayCountConvention);
     const refPrice = bid > 0 && ask > 0 ? (bid + ask) / 2 : last;
     const solved =
       refPrice > 0
-        ? solveImpliedVolatility({
+        ? solveOptionImpliedVolatility({
             marketPrice: refPrice,
             S: spotPrice,
             K: strike,
             T,
-            r: marketParams.riskFreeRate,
-            q: marketParams.dividendYield,
+            r: rCont,
+            q: qCont,
             type,
+            exerciseStyle,
           })
         : null;
     iv = solved ?? 0.35;
   } else if (iv > 5) {
-    // Normalize percentage values (e.g. 35 instead of 0.35)
     iv = iv / 100;
   }
 
-  const T = getTimeToMaturityYears(daysToMaturity, marketParams.dayCountConvention);
-  const greeks = bsmGreeks(
+  const greeks = greeksOption(
     {
       S: spotPrice,
       K: strike,
       T,
-      r: marketParams.riskFreeRate,
-      q: marketParams.dividendYield,
+      r: rCont,
+      q: qCont,
       sigma: iv,
       type,
+      exerciseStyle,
     },
     marketParams.dayCountConvention
   );
@@ -79,6 +92,7 @@ function normalizeOption(
   return {
     ticker: String(raw.ticker || `${type[0]}${strike.toFixed(0)}`),
     type,
+    exerciseStyle,
     strike,
     expirationDate,
     daysToMaturity,
@@ -145,8 +159,9 @@ export async function fetchMarketChain(
       throw new Error('Preço Spot inválido recebido do gateway.');
     }
 
+    const baseAsset = String(json.data.baseAsset || ticker).toUpperCase();
     const normalizedChain = (json.data.chain as Record<string, unknown>[])
-      .map((item) => normalizeOption(item, spotPrice, marketParams))
+      .map((item) => normalizeOption(item, baseAsset, spotPrice, marketParams))
       .filter((o): o is MarketOption => o !== null);
 
     if (normalizedChain.length === 0) {
@@ -154,12 +169,19 @@ export async function fetchMarketChain(
     }
 
     const result: MarketDataResponse = {
-      baseAsset: String(json.data.baseAsset || ticker).toUpperCase(),
+      baseAsset,
       spotPrice,
       timestamp: json.data.timestamp || new Date().toISOString(),
       source: 'gas',
       chain: normalizedChain,
       diagnostics: json.data.diagnostics,
+      historicalVolatility:
+        json.data.historicalVolatility !== undefined
+          ? Number(json.data.historicalVolatility)
+          : undefined,
+      ivHistory: Array.isArray(json.data.ivHistory)
+        ? json.data.ivHistory.map(Number).filter(Number.isFinite)
+        : undefined,
     };
 
     memoryCache.set(ticker, { data: result, fetchedAt: Date.now() });
@@ -186,6 +208,14 @@ export async function fetchMarketChain(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+export function getCachedMarketSnapshot(): Record<string, MarketDataResponse> {
+  const snapshot: Record<string, MarketDataResponse> = {};
+  for (const [key, entry] of memoryCache.entries()) {
+    snapshot[key] = entry.data;
+  }
+  return snapshot;
 }
 
 export function clearMarketCache(ticker?: string): void {

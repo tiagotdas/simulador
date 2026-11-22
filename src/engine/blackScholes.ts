@@ -1,4 +1,4 @@
-import { DayCountConvention, Greeks, OptionType } from '../types/options';
+import { DayCountConvention, ExerciseStyle, Greeks, MarketParams, OptionType } from '../types/options';
 import { getTimeToMaturityYears } from './calendar';
 
 const SQRT_2PI = Math.sqrt(2 * Math.PI);
@@ -24,12 +24,53 @@ export function normCDF(x: number): number {
   return x >= 0 ? approx : 1 - approx;
 }
 
+/**
+ * Converts an effective annual rate (standard B3 Selic/DI convention: (1 + r)^(du/252))
+ * into its continuously compounded equivalent r_c = ln(1 + r).
+ */
+export function toContinuousRate(effectiveAnnualRate: number): number {
+  const safe = Math.max(-0.99, effectiveAnnualRate);
+  return Math.log(1 + safe);
+}
+
+/**
+ * Extracts continuously compounded risk-free rate and total carry yield (dividendYield + BTC borrowRate)
+ * from B3 MarketParams.
+ */
+export function getContinuousMarketRates(marketParams: MarketParams): {
+  rCont: number;
+  qCont: number;
+} {
+  const rCont = toContinuousRate(marketParams.riskFreeRate);
+  const divCont = toContinuousRate(marketParams.dividendYield);
+  const borrowCont = toContinuousRate(marketParams.borrowRate ?? 0);
+  return {
+    rCont,
+    qCont: divCont + borrowCont,
+  };
+}
+
+/**
+ * Infers default B3 exercise style when not explicitly specified on a leg/option.
+ * On B3: equity Calls are predominantly American; Puts and ETF/index options (e.g. BOVA11) are European.
+ */
+export function inferDefaultB3ExerciseStyle(
+  type: OptionType,
+  underlyingTicker?: string
+): ExerciseStyle {
+  if (type !== 'Call') return 'European';
+  const sym = (underlyingTicker || '').trim().toUpperCase();
+  // B3 ETFs / index trackers end in 11 (BOVA11, SMAL11, IVVB11, etc.) and have European options
+  if (sym.endsWith('11') || sym.startsWith('IBOV')) return 'European';
+  return 'American';
+}
+
 export interface BSMInput {
   S: number; // Underlying spot price
   K: number; // Strike price
   T: number; // Time to maturity in years
-  r: number; // Risk-free annual rate (continuous or annualized decimal)
-  q?: number; // Continuous dividend yield (decimal)
+  r: number; // Continuously compounded risk-free rate
+  q?: number; // Continuously compounded dividend/carry yield
   sigma: number; // Implied volatility (decimal)
   type: OptionType;
 }
@@ -41,7 +82,7 @@ export function intrinsicValue(type: OptionType, S: number, K: number): number {
 }
 
 /**
- * Black-Scholes-Merton theoretical option price with continuous dividend yield q.
+ * Black-Scholes-Merton theoretical European option price with continuous carry yield q.
  */
 export function bsmPrice(input: BSMInput): number {
   const { S, K, T, r, q = 0, sigma, type } = input;
@@ -64,10 +105,13 @@ export function bsmPrice(input: BSMInput): number {
 }
 
 /**
- * Black-Scholes-Merton Greeks with dividend yield q.
- * - theta is returned per day (using 252 for du252 or 365 for dc365).
- * - vega is returned per +1 percentage point change in IV (+0.01 sigma).
- * - rho is returned per +1 percentage point change in interest rate (+0.01 r).
+ * Black-Scholes-Merton 1st and 2nd order Greeks with continuous carry yield q.
+ * - theta: per day (using 252 for du252 or 365 for dc365).
+ * - vega: per +1 percentage point change in IV (+0.01 sigma).
+ * - rho: per +1 percentage point change in interest rate (+0.01 r).
+ * - vanna: dDelta / d(+1pp IV).
+ * - volga: dVega(1pp) / d(+1pp IV).
+ * - charm: daily change in Delta as 1 day passes (-dDelta / dT / daysPerYear).
  */
 export function bsmGreeks(
   input: BSMInput,
@@ -76,14 +120,14 @@ export function bsmGreeks(
   const { S, K, T, r, q = 0, sigma, type } = input;
 
   if (type === 'Stock') {
-    return { delta: 1, gamma: 0, theta: 0, vega: 0, rho: 0 };
+    return { delta: 1, gamma: 0, theta: 0, vega: 0, rho: 0, vanna: 0, volga: 0, charm: 0 };
   }
 
   if (S <= 0 || K <= 0 || T <= 1e-6 || sigma <= 1e-6) {
     const itm = type === 'Call' ? S > K : S < K;
     const atm = Math.abs(S - K) < 1e-6;
     const delta = type === 'Call' ? (itm ? 1 : atm ? 0.5 : 0) : itm ? -1 : atm ? -0.5 : 0;
-    return { delta, gamma: 0, theta: 0, vega: 0, rho: 0 };
+    return { delta, gamma: 0, theta: 0, vega: 0, rho: 0, vanna: 0, volga: 0, charm: 0 };
   }
 
   const sqrtT = Math.sqrt(T);
@@ -96,6 +140,10 @@ export function bsmGreeks(
 
   const gamma = (discQ * pdfD1) / (S * sigma * sqrtT);
   const vega = (S * discQ * pdfD1 * sqrtT) / 100;
+  const vanna = ((-discQ * pdfD1 * d2) / sigma) / 100;
+  const volga = ((vega * d1 * d2) / sigma) / 100;
+  const commonCharmTerm =
+    discQ * pdfD1 * ((2 * (r - q) * T - d2 * sigma * sqrtT) / (2 * T * sigma * sqrtT));
 
   if (type === 'Call') {
     const delta = discQ * normCDF(d1);
@@ -104,12 +152,16 @@ export function bsmGreeks(
       r * K * discR * normCDF(d2) +
       q * S * discQ * normCDF(d1);
     const rho = (K * T * discR * normCDF(d2)) / 100;
+    const charm = (q * discQ * normCDF(d1) - commonCharmTerm) / daysPerYear;
     return {
       delta,
       gamma,
       theta: thetaAnnual / daysPerYear,
       vega,
       rho,
+      vanna,
+      volga,
+      charm,
     };
   }
 
@@ -119,6 +171,7 @@ export function bsmGreeks(
     r * K * discR * normCDF(-d2) -
     q * S * discQ * normCDF(-d1);
   const rho = (-K * T * discR * normCDF(-d2)) / 100;
+  const charm = (-q * discQ * normCDF(-d1) - commonCharmTerm) / daysPerYear;
 
   return {
     delta,
@@ -126,6 +179,9 @@ export function bsmGreeks(
     theta: thetaAnnual / daysPerYear,
     vega,
     rho,
+    vanna,
+    volga,
+    charm,
   };
 }
 
@@ -140,14 +196,16 @@ export function calculateOptionGreeksFromDays(
   type: OptionType,
   r = 0.1425,
   q = 0,
-  convention: DayCountConvention = 'du252'
+  convention: DayCountConvention = 'du252',
+  expirationDate?: string
 ): Greeks {
-  const T = getTimeToMaturityYears(calendarDays, convention);
-  return bsmGreeks({ S, K, T, r, q, sigma, type }, convention);
+  const T = getTimeToMaturityYears(calendarDays, convention, expirationDate);
+  return bsmGreeks({ S, K, T, r: toContinuousRate(r), q: toContinuousRate(q), sigma, type }, convention);
 }
 
 /**
  * Solves for Implied Volatility from a market option price using Newton-Raphson with Bisection fallback.
+ * Supports custom pricing callback (e.g. American option pricer) while defaulting to European BSM.
  */
 export function solveImpliedVolatility(params: {
   marketPrice: number;
@@ -157,16 +215,21 @@ export function solveImpliedVolatility(params: {
   r: number;
   q?: number;
   type: 'Call' | 'Put';
+  priceFn?: (sigma: number) => number;
 }): number | null {
-  const { marketPrice, S, K, T, r, q = 0, type } = params;
+  const { marketPrice, S, K, T, r, q = 0, type, priceFn } = params;
   if (marketPrice <= 0 || S <= 0 || K <= 0 || T <= 1e-6) return null;
+
+  const evalPrice =
+    priceFn ?? ((sigma: number) => bsmPrice({ S, K, T, r, q, sigma, type }));
 
   const discR = Math.exp(-r * T);
   const discQ = Math.exp(-q * T);
-  const lowerBound =
-    type === 'Call'
-      ? Math.max(0, S * discQ - K * discR)
-      : Math.max(0, K * discR - S * discQ);
+  const lowerBound = priceFn
+    ? intrinsicValue(type, S, K)
+    : type === 'Call'
+    ? Math.max(0, S * discQ - K * discR)
+    : Math.max(0, K * discR - S * discQ);
 
   if (marketPrice <= lowerBound + 1e-6) return null;
 
@@ -176,7 +239,7 @@ export function solveImpliedVolatility(params: {
 
   // Newton-Raphson attempts first
   for (let i = 0; i < 25; i++) {
-    const price = bsmPrice({ S, K, T, r, q, sigma, type });
+    const price = evalPrice(sigma);
     const diff = price - marketPrice;
     if (Math.abs(diff) < 1e-5) return sigma;
 
@@ -200,7 +263,7 @@ export function solveImpliedVolatility(params: {
   // Bisection fallback for guaranteed convergence
   for (let i = 0; i < 40; i++) {
     const mid = 0.5 * (low + high);
-    const price = bsmPrice({ S, K, T, r, q, sigma: mid, type });
+    const price = evalPrice(mid);
     if (Math.abs(price - marketPrice) < 1e-5) return mid;
     if (price > marketPrice) high = mid;
     else low = mid;
@@ -210,7 +273,8 @@ export function solveImpliedVolatility(params: {
 }
 
 /**
- * Risk-neutral log-normal probability that S_T > threshold under Black-Scholes-Merton.
+ * Log-normal probability that S_T > threshold under Black-Scholes-Merton.
+ * Set drift = 0 for zero-drift short-horizon probability or drift = r - q for risk-neutral probability.
  */
 export function probabilitySpotAbove(
   S: number,
@@ -218,13 +282,15 @@ export function probabilitySpotAbove(
   T: number,
   r: number,
   q: number,
-  sigma: number
+  sigma: number,
+  zeroDrift = false
 ): number {
   if (threshold <= 0) return 1;
   if (S <= 0) return 0;
   if (T <= 1e-6 || sigma <= 1e-6) return S > threshold ? 1 : 0;
 
   const sqrtT = Math.sqrt(T);
-  const d2 = (Math.log(S / threshold) + (r - q - 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
+  const drift = zeroDrift ? 0 : r - q;
+  const d2 = (Math.log(S / threshold) + (drift - 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
   return normCDF(d2);
 }

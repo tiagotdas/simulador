@@ -33,9 +33,12 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
   strategyTemplate,
 }) => {
   const [showCostControls, setShowCostControls] = useState(false);
+  const [showSecondOrderGreeks, setShowSecondOrderGreeks] = useState(false);
 
   const isDebit = metrics.netCost > 0.005;
   const isCredit = metrics.netCost < -0.005;
+  const mb = metrics.marginBreakdown;
+  const cb = metrics.costBreakdown;
 
   return (
     <aside className="space-y-4">
@@ -44,7 +47,7 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Shield size={15} className="text-sky-400" />
-            <h2 className="text-sm font-bold text-slate-100">Risco, Retorno & Margem</h2>
+            <h2 className="text-sm font-bold text-slate-100">Risco, Retorno & Margem CORE</h2>
           </div>
           {metrics.pop !== null && (
             <span className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 font-mono text-xs font-bold">
@@ -73,17 +76,36 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
             </div>
 
             <div className="bg-[#0b101b] border border-slate-800 rounded-lg p-3">
-              <div className="text-[11px] font-medium text-slate-400" title="Estimativa conservadora de garantia/capital exigido na B3">
-                Garantia / Capital Est.
+              <div
+                className="text-[11px] font-medium text-slate-400"
+                title="Capital total comprometido: Caixa inicial + chamada de margem estimada por matriz de estresse 2D (Proxy CORE B3)"
+              >
+                Capital / Margem CORE
               </div>
               <div className="mt-1 text-base font-mono font-bold text-amber-300 tabular-nums">
                 {formatBRL(metrics.estimatedMargin)}
               </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                {metrics.ror !== null ? `RoR máx: ${formatPct(metrics.ror, 1)}` : 'Proxy CORE B3'}
+              <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                {mb && mb.coreMarginRequired > 0
+                  ? `Margem: ${formatBRL(mb.coreMarginRequired)}`
+                  : metrics.ror !== null
+                  ? `RoR máx: ${formatPct(metrics.ror, 1)}`
+                  : 'Proxy CORE 2D'}
               </div>
             </div>
           </div>
+
+          {/* Binding CORE Stress Scenario Banner */}
+          {mb?.bindingScenario && mb.coreMarginRequired > 0 && (
+            <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 flex items-center justify-between gap-2">
+              <span className="font-medium">Cenário estresse CORE vinculante:</span>
+              <span className="font-mono font-bold whitespace-nowrap">
+                Spot {mb.bindingScenario.spotShockPct > 0 ? '+' : ''}
+                {mb.bindingScenario.spotShockPct}% | IV {mb.bindingScenario.volShockRelPct > 0 ? '+' : ''}
+                {mb.bindingScenario.volShockRelPct}%
+              </span>
+            </div>
+          )}
 
           {/* Max Profit & Max Loss */}
           <div className="grid grid-cols-2 gap-3">
@@ -133,7 +155,7 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
             )}
           </div>
 
-          {/* Portfolio Greeks */}
+          {/* Portfolio Greeks (1st + Collapsible 2nd Order) */}
           <div className="bg-[#0b101b] border border-slate-800 rounded-lg p-3.5 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
@@ -183,6 +205,47 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
                 </div>
               </div>
             </div>
+
+            <div className="pt-2 border-t border-slate-800/80">
+              <button
+                type="button"
+                onClick={() => setShowSecondOrderGreeks((v) => !v)}
+                className="w-full flex items-center justify-between text-[11px] font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                <span>Gregas de 2ª Ordem (Vanna, Volga, Charm, Rho)</span>
+                {showSecondOrderGreeks ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
+              {showSecondOrderGreeks && (
+                <div className="mt-2.5 grid grid-cols-2 gap-2.5 font-mono tabular-nums text-xs">
+                  <div title="Sensibilidade do Delta por +1pp de IV (∂Δ/∂σ)">
+                    <div className="text-[10px] font-sans text-slate-400">Vanna (Δ/+1pp IV)</div>
+                    <div className="font-bold text-slate-200">
+                      {(metrics.greeks.vanna ?? 0) >= 0 ? '+' : ''}
+                      {(metrics.greeks.vanna ?? 0).toFixed(3)}
+                    </div>
+                  </div>
+                  <div title="Convexidade do Vega por +1pp de IV (∂ν/∂σ)">
+                    <div className="text-[10px] font-sans text-slate-400">Volga (ν/+1pp IV)</div>
+                    <div className="font-bold text-cyan-200">
+                      {formatBRL(metrics.greeks.volga ?? 0, true)}
+                    </div>
+                  </div>
+                  <div title="Variação diária do Delta com a passagem do tempo (-∂Δ/∂T)">
+                    <div className="text-[10px] font-sans text-slate-400">Charm (Δ/dia)</div>
+                    <div className="font-bold text-slate-200">
+                      {(metrics.greeks.charm ?? 0) >= 0 ? '+' : ''}
+                      {(metrics.greeks.charm ?? 0).toFixed(3)}
+                    </div>
+                  </div>
+                  <div title="Sensibilidade a +1pp na taxa Selic/DI">
+                    <div className="text-[10px] font-sans text-slate-400">Rho (ρ / +1pp DI)</div>
+                    <div className="font-bold text-slate-200">
+                      {formatBRL(metrics.greeks.rho, true)}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* B3 Costs & IR Collapsible */}
@@ -197,9 +260,12 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
                 Custos B3 & IR
                 {costConfig.includeCosts && (
                   <span className="font-mono text-[11px] text-amber-300">
-                    ({formatBRL(metrics.operationalCosts)} taxas
+                    ({formatBRL(metrics.operationalCosts)} ent.
+                    {costConfig.includeExitCosts && cb && cb.estimatedExitOrExerciseCosts > 0
+                      ? ` + ${formatBRL(cb.estimatedExitOrExerciseCosts)} ex.`
+                      : ''}
                     {costConfig.includeIR
-                      ? ` + ${costConfig.isDayTrade ? '20%' : '15%'} IR`
+                      ? ` • IR ${costConfig.isDayTrade ? '20%' : '15%'}`
                       : ''}
                     )
                   </span>
@@ -216,6 +282,17 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
                     type="checkbox"
                     checked={costConfig.includeCosts}
                     onChange={(e) => onCostConfigChange({ includeCosts: e.target.checked })}
+                    className="accent-sky-400 rounded"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between text-slate-300 cursor-pointer">
+                  <span>Incluir saída / exercício (nocional ITM)</span>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(costConfig.includeExitCosts)}
+                    disabled={!costConfig.includeCosts}
+                    onChange={(e) => onCostConfigChange({ includeExitCosts: e.target.checked })}
                     className="accent-sky-400 rounded"
                   />
                 </label>
@@ -250,30 +327,63 @@ export const RiskPanel: React.FC<RiskPanelProps> = ({
                 </label>
 
                 {costConfig.includeCosts && costConfig.includeIR && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => onCostConfigChange({ isDayTrade: false })}
-                      className={`py-1.5 rounded border text-xs font-semibold ${
-                        !costConfig.isDayTrade
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-200'
-                          : 'bg-[#090d16] border-slate-700 text-slate-400'
-                      }`}
-                    >
-                      Swing (15%)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onCostConfigChange({ isDayTrade: true })}
-                      className={`py-1.5 rounded border text-xs font-semibold ${
-                        costConfig.isDayTrade
-                          ? 'bg-sky-500/20 border-sky-500 text-sky-200'
-                          : 'bg-[#090d16] border-slate-700 text-slate-400'
-                      }`}
-                    >
-                      Day-Trade (20%)
-                    </button>
-                  </div>
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onCostConfigChange({ isDayTrade: false })}
+                        className={`py-1.5 rounded border text-xs font-semibold ${
+                          !costConfig.isDayTrade
+                            ? 'bg-sky-500/20 border-sky-500 text-sky-200'
+                            : 'bg-[#090d16] border-slate-700 text-slate-400'
+                        }`}
+                      >
+                        Swing (15%)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onCostConfigChange({ isDayTrade: true })}
+                        className={`py-1.5 rounded border text-xs font-semibold ${
+                          costConfig.isDayTrade
+                            ? 'bg-sky-500/20 border-sky-500 text-sky-200'
+                            : 'bg-[#090d16] border-slate-700 text-slate-400'
+                        }`}
+                      >
+                        Day-Trade (20%)
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor="loss-offset-input"
+                        className="text-slate-400"
+                        title="Prejuízo acumulado em meses anteriores na mesma modalidade para abater da base de cálculo do IR"
+                      >
+                        Prejuízo a compensar (R$)
+                      </label>
+                      <input
+                        id="loss-offset-input"
+                        type="number"
+                        step="50"
+                        min="0"
+                        value={costConfig.accumulatedLossOffset ?? 0}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          onCostConfigChange({
+                            accumulatedLossOffset: isNaN(v) ? 0 : Math.max(0, v),
+                          });
+                        }}
+                        className="w-24 bg-[#090d16] border border-slate-700 rounded px-2 py-1 font-mono text-right text-white"
+                      />
+                    </div>
+
+                    {cb && (
+                      <div className="text-[11px] font-mono text-slate-400 pt-1 border-t border-slate-800/80 flex justify-between">
+                        <span>IRRF &ldquo;dedo-duro&rdquo; (info):</span>
+                        <span>{formatBRL(cb.irrfInformative)}</span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}

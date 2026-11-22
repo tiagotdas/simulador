@@ -50,25 +50,37 @@ export const OrderTicketModal: React.FC<OrderTicketModalProps> = ({
     return sum;
   }, 0);
 
+  const mb = metrics.marginBreakdown;
+  const cb = metrics.costBreakdown;
+
   const buildOrderText = () => {
     const lines = [
       `BOLETA DE EXECUÇÃO B3 — ${ticker.toUpperCase()} (${strategyName})`,
-      `Spot Ref.: ${formatBRL(marketParams.spotPrice)} | Selic: ${(marketParams.riskFreeRate * 100).toFixed(2)}%`,
+      `Spot Ref.: ${formatBRL(marketParams.spotPrice)} | Selic: ${(marketParams.riskFreeRate * 100).toFixed(2)}% | BTC: ${((marketParams.borrowRate ?? 0) * 100).toFixed(2)}%`,
       `--------------------------------------------------`,
       ...activeLegs.map((l) => {
         const side = l.action === 'Buy' ? 'COMPRA' : 'VENDA ';
         const code = l.ticker || `${ticker}${l.type[0]}${Math.round(l.strike * 10)}`;
+        const styleTag = l.type === 'Stock' ? '' : l.exerciseStyle === 'American' ? ' [AM]' : ' [EU]';
         const exp = l.type === 'Stock' ? 'À VISTA' : `Venc. ${formatDateBR(l.expirationDate)}`;
         const strikeTxt = l.type === 'Stock' ? '' : ` | Strike R$ ${l.strike.toFixed(2)}`;
-        return `${side} ${String(l.quantity).padStart(4, ' ')} ${code.padEnd(10, ' ')} @ R$ ${l.price.toFixed(2)}${strikeTxt} (${exp})`;
+        return `${side} ${String(l.quantity).padStart(4, ' ')} ${code.padEnd(10, ' ')}${styleTag} @ R$ ${l.price.toFixed(2)}${strikeTxt} (${exp})`;
       }),
       `--------------------------------------------------`,
       `Fluxo Líquido: ${metrics.netCost >= 0 ? 'DÉBITO' : 'CRÉDITO'} ${formatBRL(Math.abs(metrics.netCost))}`,
-      `Garantia Est.: ${formatBRL(metrics.estimatedMargin)} | Lucro Máx: ${
+      `Capital/Margem CORE Est.: ${formatBRL(metrics.estimatedMargin)}${
+        mb?.bindingScenario && mb.coreMarginRequired > 0
+          ? ` (Cenário: Spot ${mb.bindingScenario.spotShockPct > 0 ? '+' : ''}${mb.bindingScenario.spotShockPct}%, IV ${mb.bindingScenario.volShockRelPct > 0 ? '+' : ''}${mb.bindingScenario.volShockRelPct}%)`
+          : ''
+      }`,
+      `Lucro Máx: ${
         typeof metrics.maxProfit === 'number' ? formatBRL(metrics.maxProfit) : 'Ilimitado'
       } | Risco Máx: ${
         typeof metrics.maxLoss === 'number' ? formatBRL(metrics.maxLoss) : 'Ilimitado'
       }`,
+      cb && (cb.entryCosts > 0 || cb.estimatedExitOrExerciseCosts > 0)
+        ? `Taxas Est.: Entrada ${formatBRL(cb.entryCosts)} | Saída/Exerc. ${formatBRL(cb.estimatedExitOrExerciseCosts)}`
+        : '',
       metrics.breakevens.length > 0
         ? `Breakevens: ${metrics.breakevens.map((b) => formatBRL(b)).join(' / ')}`
         : '',
@@ -104,7 +116,7 @@ export const OrderTicketModal: React.FC<OrderTicketModalProps> = ({
                 Boleta Operacional B3 — {ticker.toUpperCase()}
               </h2>
               <p className="text-xs text-slate-400">
-                Confira códigos de série, lotes e preços limite antes de enviar no Home Broker / Profit
+                Confira códigos de série, estilo (AM/EU), lotes e preços limite antes de enviar no Home Broker / Profit
               </p>
             </div>
           </div>
@@ -150,7 +162,12 @@ export const OrderTicketModal: React.FC<OrderTicketModalProps> = ({
                         </span>
                       </td>
                       <td className="py-2.5 px-3 font-bold text-slate-100">
-                        {l.ticker || `${ticker} ${l.type}`}
+                        <span>{l.ticker || `${ticker} ${l.type}`}</span>
+                        {l.type !== 'Stock' && (
+                          <span className="ml-1.5 px-1 py-0.2 rounded bg-slate-800 text-slate-300 text-[10px]">
+                            {l.exerciseStyle === 'American' ? 'AM' : 'EU'}
+                          </span>
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-right text-slate-300">
                         {l.type === 'Stock' ? 'À vista' : formatBRL(l.strike)}
@@ -188,7 +205,7 @@ export const OrderTicketModal: React.FC<OrderTicketModalProps> = ({
               </div>
             </div>
             <div className="bg-[#0b101b] border border-slate-800 rounded-lg p-3">
-              <div className="text-slate-400 text-[11px]">Garantia Est.</div>
+              <div className="text-slate-400 text-[11px]">Margem CORE Est.</div>
               <div className="mt-1 font-mono font-bold text-sm text-amber-300">
                 {formatBRL(metrics.estimatedMargin)}
               </div>
@@ -200,9 +217,12 @@ export const OrderTicketModal: React.FC<OrderTicketModalProps> = ({
               </div>
             </div>
             <div className="bg-[#0b101b] border border-slate-800 rounded-lg p-3">
-              <div className="text-slate-400 text-[11px]">Taxas B3 + Corr.</div>
+              <div className="text-slate-400 text-[11px]">Taxas Ent. + Saída/Ex.</div>
               <div className="mt-1 font-mono font-bold text-sm text-slate-200">
-                {formatBRL(metrics.operationalCosts)}
+                {formatBRL(
+                  (cb?.entryCosts ?? metrics.operationalCosts) +
+                    (cb?.estimatedExitOrExerciseCosts ?? 0)
+                )}
               </div>
             </div>
           </div>

@@ -86,9 +86,12 @@ export const TopBar: React.FC<TopBarProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5 hidden sm:block">
-                Payoff BSM ({marketParams.dayCountConvention === 'du252' ? 'du/252' : 'dc/365'}) •
-                Selic {(marketParams.riskFreeRate * 100).toFixed(2)}% • DY{' '}
-                {(marketParams.dividendYield * 100).toFixed(1)}%
+                B3 {marketParams.dayCountConvention === 'du252' ? 'du/252 ANBIMA' : 'dc/365'} •
+                Selic {(marketParams.riskFreeRate * 100).toFixed(2)}% • BTC{' '}
+                {((marketParams.borrowRate ?? 0) * 100).toFixed(1)}%
+                {marketParams.dividendYield > 0
+                  ? ` • DY ${(marketParams.dividendYield * 100).toFixed(1)}%`
+                  : ''}
               </p>
             </div>
           </div>
@@ -163,14 +166,14 @@ export const TopBar: React.FC<TopBarProps> = ({
                 }`}
               >
                 <SlidersHorizontal size={14} />
-                <span className="hidden md:inline">BSM</span>
+                <span className="hidden md:inline">B3 / BSM</span>
                 <ChevronDown size={13} />
               </button>
 
               {showParams && (
-                <div className="absolute right-0 mt-2 w-72 rounded-xl bg-[#0f1623] border border-slate-700 shadow-2xl p-4 z-50 space-y-3.5">
+                <div className="absolute right-0 mt-2 w-80 rounded-xl bg-[#0f1623] border border-slate-700 shadow-2xl p-4 z-50 space-y-3.5">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                    <span className="text-xs font-bold text-slate-200">Parâmetros B3 / Black-Scholes</span>
+                    <span className="text-xs font-bold text-slate-200">Parâmetros B3 / Precificação</span>
                     <button
                       type="button"
                       onClick={() => setShowParams(false)}
@@ -182,7 +185,7 @@ export const TopBar: React.FC<TopBarProps> = ({
 
                   <div className="space-y-1">
                     <label htmlFor="selic-input" className="text-xs text-slate-300 flex justify-between">
-                      <span>Taxa Selic / DI (% a.a.)</span>
+                      <span>Taxa Selic / DI (% a.a. efetiva)</span>
                       <span className="font-mono text-sky-400">
                         {(marketParams.riskFreeRate * 100).toFixed(2)}%
                       </span>
@@ -200,11 +203,36 @@ export const TopBar: React.FC<TopBarProps> = ({
                       }}
                       className="w-full bg-[#090d16] border border-slate-700 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
                     />
+                    <p className="text-[10px] text-slate-400 font-mono">
+                      Contínua equiv. ln(1+r): {(Math.log(1 + marketParams.riskFreeRate) * 100).toFixed(2)}% a.a.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label htmlFor="btc-input" className="text-xs text-slate-300 flex justify-between">
+                      <span>Taxa Aluguel / BTC (% a.a.)</span>
+                      <span className="font-mono text-sky-400">
+                        {((marketParams.borrowRate ?? 0) * 100).toFixed(2)}%
+                      </span>
+                    </label>
+                    <input
+                      id="btc-input"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="30"
+                      value={Number(((marketParams.borrowRate ?? 0) * 100).toFixed(2))}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value);
+                        if (!isNaN(v) && v >= 0) onMarketParamsChange({ borrowRate: v / 100 });
+                      }}
+                      className="w-full bg-[#090d16] border border-slate-700 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
+                    />
                   </div>
 
                   <div className="space-y-1">
                     <label htmlFor="dy-input" className="text-xs text-slate-300 flex justify-between">
-                      <span>Dividend Yield Estimado (% a.a.)</span>
+                      <span>DY Não Ajustado (% a.a.)</span>
                       <span className="font-mono text-sky-400">
                         {(marketParams.dividendYield * 100).toFixed(1)}%
                       </span>
@@ -222,6 +250,9 @@ export const TopBar: React.FC<TopBarProps> = ({
                       }}
                       className="w-full bg-[#090d16] border border-slate-700 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
                     />
+                    <p className="text-[10px] text-slate-400 leading-snug">
+                      Na B3, strikes de ações são ajustados por dividendos/JCP (padrão 0%). Use DY &gt; 0 apenas para ativos/ETFs sem ajuste de strike.
+                    </p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -236,7 +267,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                             : 'bg-[#090d16] border-slate-700 text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        B3 (du/252)
+                        B3 (du/252 ANBIMA)
                       </button>
                       <button
                         type="button"
@@ -248,6 +279,34 @@ export const TopBar: React.FC<TopBarProps> = ({
                         }`}
                       >
                         Corridos (dc/365)
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <span className="text-xs text-slate-300 block">Drift na Probabilidade (PoP)</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onMarketParamsChange({ popDriftMode: 'risk-neutral' })}
+                        className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-colors ${
+                          (marketParams.popDriftMode ?? 'risk-neutral') === 'risk-neutral'
+                            ? 'bg-sky-600/20 border-sky-500 text-sky-300'
+                            : 'bg-[#090d16] border-slate-700 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Neutro ao Risco
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onMarketParamsChange({ popDriftMode: 'zero' })}
+                        className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-colors ${
+                          marketParams.popDriftMode === 'zero'
+                            ? 'bg-sky-600/20 border-sky-500 text-sky-300'
+                            : 'bg-[#090d16] border-slate-700 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Zero Drift
                       </button>
                     </div>
                   </div>

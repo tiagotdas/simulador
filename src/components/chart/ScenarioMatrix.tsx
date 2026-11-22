@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Grid } from 'lucide-react';
-import { CostConfig, Leg, MarketParams } from '../../types/options';
+import { CostConfig, IvShockMode, Leg, MarketParams } from '../../types/options';
 import { calculateScenarioMatrix, getActiveLegs } from '../../engine/payoff';
 import { formatBRLCompact, formatPct } from '../../utils/format';
 
@@ -9,6 +9,7 @@ interface ScenarioMatrixProps {
   marketParams: MarketParams;
   costConfig: CostConfig;
   ivShiftPercent: number;
+  ivShockMode?: IvShockMode;
   capitalBase: number;
 }
 
@@ -17,6 +18,7 @@ export const ScenarioMatrix: React.FC<ScenarioMatrixProps> = ({
   marketParams,
   costConfig,
   ivShiftPercent,
+  ivShockMode = 'parallel',
   capitalBase,
 }) => {
   const [displayMode, setDisplayMode] = useState<'brl' | 'roi'>('brl');
@@ -32,9 +34,10 @@ export const ScenarioMatrix: React.FC<ScenarioMatrixProps> = ({
         costConfig,
         ivShiftPercent,
         capitalBase,
-        rangePct
+        rangePct,
+        ivShockMode
       ),
-    [activeLegs, marketParams, costConfig, ivShiftPercent, capitalBase, rangePct]
+    [activeLegs, marketParams, costConfig, ivShiftPercent, capitalBase, rangePct, ivShockMode]
   );
 
   const getCellStyle = (pnl: number) => {

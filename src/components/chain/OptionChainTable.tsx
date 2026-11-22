@@ -107,7 +107,7 @@ export const OptionChainTable: React.FC<OptionChainTableProps> = ({
             >
               {expirations.map((exp) => (
                 <option key={exp.date} value={exp.date}>
-                  {formatDateBR(exp.date)} ({exp.days} dc / {calendarToBusinessDays(exp.days)} du)
+                  {formatDateBR(exp.date)} ({exp.days} dc / {calendarToBusinessDays(exp.days, exp.date)} du)
                 </option>
               ))}
             </select>

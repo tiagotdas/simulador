@@ -66,6 +66,8 @@ export const PayoffChart: React.FC<PayoffChartProps> = ({
     return dataMax / (dataMax - dataMin);
   }, [points]);
 
+  const shockMode = simParams.ivShockMode ?? 'parallel';
+
   // Exact telemetry at simulated target spot
   const targetStats = useMemo(() => {
     const expiryPnl = evaluateStrategyPnl(
@@ -74,7 +76,8 @@ export const PayoffChart: React.FC<PayoffChartProps> = ({
       nearestDte,
       simParams.ivShiftPercent,
       marketParams,
-      costConfig
+      costConfig,
+      shockMode
     );
     const clampedDays = Math.min(Math.max(0, simParams.daysElapsed), nearestDte);
     const theoPnl = evaluateStrategyPnl(
@@ -83,21 +86,23 @@ export const PayoffChart: React.FC<PayoffChartProps> = ({
       clampedDays,
       simParams.ivShiftPercent,
       marketParams,
-      costConfig
+      costConfig,
+      shockMode
     );
     const greeksAtTarget = evaluatePortfolioGreeks(
       activeLegs,
       simParams.targetSpot,
       clampedDays,
       simParams.ivShiftPercent,
-      marketParams
+      marketParams,
+      shockMode
     );
     const pctMove =
       marketParams.spotPrice > 0
         ? ((simParams.targetSpot - marketParams.spotPrice) / marketParams.spotPrice) * 100
         : 0;
     return { expiryPnl, theoPnl, greeksAtTarget, pctMove };
-  }, [activeLegs, simParams, nearestDte, marketParams, costConfig]);
+  }, [activeLegs, simParams, nearestDte, marketParams, costConfig, shockMode]);
 
   const isModifiedSim =
     Math.abs(simParams.targetSpot - marketParams.spotPrice) > 0.01 ||
@@ -301,7 +306,9 @@ export const PayoffChart: React.FC<PayoffChartProps> = ({
                       </div>
                       {showTheoretical && (
                         <div className="flex items-center justify-between gap-4">
-                          <span className="text-sky-300">Teórico (T+{simParams.daysElapsed}d)</span>
+                          <span className="text-sky-300">
+                            Teórico (T+{Math.min(simParams.daysElapsed, nearestDte)}d)
+                          </span>
                           <span
                             className={`font-mono font-bold ${
                               pt.theoreticalPnl >= 0 ? 'text-sky-300' : 'text-rose-300'
@@ -448,22 +455,40 @@ export const PayoffChart: React.FC<PayoffChartProps> = ({
 
         {/* 3. IV Shock Slider */}
         <div className="space-y-2">
-          <div className="flex items-center justify-between text-xs">
+          <div className="flex items-center justify-between gap-2 text-xs">
             <label htmlFor="slider-iv" className="font-semibold text-slate-300">
-              Choque de Volatilidade (Vega)
+              Choque de IV (Vega)
             </label>
-            <span
-              className={`font-mono font-bold tabular-nums ${
-                simParams.ivShiftPercent > 0
-                  ? 'text-amber-300'
-                  : simParams.ivShiftPercent < 0
-                  ? 'text-sky-300'
-                  : 'text-slate-200'
-              }`}
-            >
-              {simParams.ivShiftPercent > 0 ? '+' : ''}
-              {simParams.ivShiftPercent} pp IV
-            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  onSimParamsChange({
+                    ivShockMode: shockMode === 'parallel' ? 'skew-aware' : 'parallel',
+                  })
+                }
+                title="Alternar entre choque paralelo igual em todas as pernas ou choque ponderado por prazo (1/√T) e asas OTM (Skew-Aware)"
+                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                  shockMode === 'skew-aware'
+                    ? 'bg-sky-500/20 border-sky-500/40 text-sky-300'
+                    : 'bg-[#090d16] border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {shockMode === 'skew-aware' ? 'Skew/Termo' : 'Paralelo'}
+              </button>
+              <span
+                className={`font-mono font-bold tabular-nums ${
+                  simParams.ivShiftPercent > 0
+                    ? 'text-amber-300'
+                    : simParams.ivShiftPercent < 0
+                    ? 'text-sky-300'
+                    : 'text-slate-200'
+                }`}
+              >
+                {simParams.ivShiftPercent > 0 ? '+' : ''}
+                {simParams.ivShiftPercent} pp
+              </span>
+            </div>
           </div>
           <input
             id="slider-iv"

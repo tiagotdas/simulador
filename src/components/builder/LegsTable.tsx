@@ -6,9 +6,10 @@ import {
   RotateCcw,
   Trash2,
 } from 'lucide-react';
-import { ActionType, Leg, MarketParams, OptionType } from '../../types/options';
-import { bsmGreeks } from '../../engine/blackScholes';
-import { getTimeToMaturityYears } from '../../engine/calendar';
+import { ActionType, ExerciseStyle, Leg, MarketParams, OptionType } from '../../types/options';
+import { greeksOption } from '../../engine/americanPricing';
+import { getContinuousMarketRates, inferDefaultB3ExerciseStyle } from '../../engine/blackScholes';
+import { addDaysToDate, getTimeToMaturityYears, toIsoDateString } from '../../engine/calendar';
 import { formatBRL } from '../../utils/format';
 
 interface LegsTableProps {
@@ -36,18 +37,25 @@ export const LegsTable: React.FC<LegsTableProps> = ({
   canUndo,
   onUndo,
 }) => {
+  const { rCont, qCont } = getContinuousMarketRates(marketParams);
+
   const computeUnitDelta = (leg: Leg): number => {
     if (leg.type === 'Stock') return 1;
-    const T = getTimeToMaturityYears(leg.daysToMaturity, marketParams.dayCountConvention);
-    const g = bsmGreeks(
+    const T = getTimeToMaturityYears(
+      leg.daysToMaturity,
+      marketParams.dayCountConvention,
+      leg.expirationDate
+    );
+    const g = greeksOption(
       {
         S: marketParams.spotPrice,
         K: leg.strike,
         T,
-        r: marketParams.riskFreeRate,
-        q: marketParams.dividendYield,
+        r: rCont,
+        q: qCont,
         sigma: leg.impliedVolatility > 0 ? leg.impliedVolatility : 0.35,
         type: leg.type,
+        exerciseStyle: leg.exerciseStyle ?? 'European',
       },
       marketParams.dayCountConvention
     );
@@ -129,7 +137,7 @@ export const LegsTable: React.FC<LegsTableProps> = ({
             </p>
             <p className="text-xs text-slate-400">
               Use os botões <strong className="text-slate-200">+ Call / + Put / + Ação</strong> acima, clique em Bid/Ask na{' '}
-              <strong className="text-slate-200">Option Chain</strong> ou escolha um dos 45 modelos de estratégia.
+              <strong className="text-slate-200">Option Chain</strong> ou escolha um dos 50 modelos de estratégia.
             </p>
           </div>
         ) : (
@@ -140,7 +148,7 @@ export const LegsTable: React.FC<LegsTableProps> = ({
                   On
                 </th>
                 <th className="py-2.5 px-2">Lado</th>
-                <th className="py-2.5 px-2">Tipo</th>
+                <th className="py-2.5 px-2">Tipo / Estilo</th>
                 <th className="py-2.5 px-2">Código B3</th>
                 <th className="py-2.5 px-2 text-right">Strike</th>
                 <th className="py-2.5 px-2 text-center">DTE (d)</th>
@@ -160,6 +168,8 @@ export const LegsTable: React.FC<LegsTableProps> = ({
                   leg.bid && leg.ask && leg.bid > 0 && leg.ask > 0
                     ? Number(((leg.bid + leg.ask) / 2).toFixed(2))
                     : null;
+                const legStyle: ExerciseStyle =
+                  leg.exerciseStyle ?? inferDefaultB3ExerciseStyle(leg.type, ticker);
 
                 return (
                   <tr
@@ -205,31 +215,54 @@ export const LegsTable: React.FC<LegsTableProps> = ({
                       </button>
                     </td>
 
-                    {/* Type Selector */}
+                    {/* Type + Exercise Style Selector */}
                     <td className="py-2.5 px-2">
-                      <select
-                        value={leg.type}
-                        aria-label="Tipo do instrumento"
-                        onChange={(e) => {
-                          const newType = e.target.value as OptionType;
-                          onUpdateLeg(leg.id, {
-                            type: newType,
-                            ...(newType === 'Stock'
-                              ? {
-                                  ticker: ticker.toUpperCase(),
-                                  strike: marketParams.spotPrice,
-                                  price: marketParams.spotPrice,
-                                  impliedVolatility: 0,
-                                }
-                              : {}),
-                          });
-                        }}
-                        className="bg-[#090d16] border border-slate-700 rounded-md px-2 py-1 text-xs font-semibold text-slate-100 outline-none"
-                      >
-                        <option value="Call">Call</option>
-                        <option value="Put">Put</option>
-                        <option value="Stock">Ação</option>
-                      </select>
+                      <div className="flex items-center gap-1">
+                        <select
+                          value={leg.type}
+                          aria-label="Tipo do instrumento"
+                          onChange={(e) => {
+                            const newType = e.target.value as OptionType;
+                            onUpdateLeg(leg.id, {
+                              type: newType,
+                              ...(newType === 'Stock'
+                                ? {
+                                    ticker: ticker.toUpperCase(),
+                                    strike: marketParams.spotPrice,
+                                    price: marketParams.spotPrice,
+                                    impliedVolatility: 0,
+                                    exerciseStyle: undefined,
+                                  }
+                                : {
+                                    exerciseStyle: inferDefaultB3ExerciseStyle(newType, ticker),
+                                  }),
+                            });
+                          }}
+                          className="bg-[#090d16] border border-slate-700 rounded-md px-1.5 py-1 text-xs font-semibold text-slate-100 outline-none"
+                        >
+                          <option value="Call">Call</option>
+                          <option value="Put">Put</option>
+                          <option value="Stock">Ação</option>
+                        </select>
+                        {leg.type !== 'Stock' && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpdateLeg(leg.id, {
+                                exerciseStyle: legStyle === 'American' ? 'European' : 'American',
+                              })
+                            }
+                            title={`Estilo ${legStyle === 'American' ? 'Americana (Bjerksund-Stensland)' : 'Europeia (BSM)'} — clique para alternar`}
+                            className={`px-1.5 py-1 rounded font-mono text-[10px] font-bold border transition-colors ${
+                              legStyle === 'American'
+                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                                : 'bg-slate-800 text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            {legStyle === 'American' ? 'AM' : 'EU'}
+                          </button>
+                        )}
+                      </div>
                     </td>
 
                     {/* Ticker */}
@@ -279,7 +312,12 @@ export const LegsTable: React.FC<LegsTableProps> = ({
                           aria-label="Dias até o vencimento"
                           onChange={(e) => {
                             const v = parseInt(e.target.value, 10);
-                            if (!isNaN(v) && v >= 1) onUpdateLeg(leg.id, { daysToMaturity: v });
+                            if (!isNaN(v) && v >= 1) {
+                              onUpdateLeg(leg.id, {
+                                daysToMaturity: v,
+                                expirationDate: toIsoDateString(addDaysToDate(new Date(), v)),
+                              });
+                            }
                           }}
                           className="bg-[#090d16] border border-slate-700/80 rounded-md px-1.5 py-1 font-mono text-slate-200 w-14 text-center tabular-nums no-spinner outline-none focus:border-sky-500"
                         />

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
+  Briefcase,
   Camera,
   Grid,
   Share2,
@@ -16,16 +18,19 @@ import {
   OptionType,
   SavedStrategy,
   SimulationParams,
+  StrategyAdjustment,
   StrategyTemplate,
   TradeStatus,
 } from './types/options';
-import { bsmPrice } from './engine/blackScholes';
+import { priceOption } from './engine/americanPricing';
+import { getContinuousMarketRates, inferDefaultB3ExerciseStyle } from './engine/blackScholes';
 import {
   generateB3OptionTicker,
   getTimeToMaturityYears,
   getUpcomingB3Expiries,
 } from './engine/calendar';
 import { getActiveLegs } from './engine/payoff';
+import { getDefaultBetaForTicker, refreshLegsDynamicDte } from './engine/portfolioRisk';
 import { calculateStrategyMetrics } from './engine/riskMetrics';
 import {
   generateLegId,
@@ -33,7 +38,7 @@ import {
   roundToB3Strike,
   STRATEGIES,
 } from './engine/strategies';
-import { fetchMarketChain } from './services/marketData';
+import { fetchMarketChain, getCachedMarketSnapshot } from './services/marketData';
 import { generateRealisticB3Chain } from './services/mockMarketData';
 import {
   decodeStrategyFromUrl,
@@ -49,19 +54,23 @@ import { PayoffChart } from './components/chart/PayoffChart';
 import { ScenarioMatrix } from './components/chart/ScenarioMatrix';
 import { LegsTable } from './components/builder/LegsTable';
 import { OptionChainTable } from './components/chain/OptionChainTable';
+import { VolatilityPanel } from './components/volatility/VolatilityPanel';
+import { PortfolioView } from './components/portfolio/PortfolioView';
 import { RiskPanel } from './components/risk/RiskPanel';
 import { StrategyExplorerModal } from './components/builder/StrategyExplorerModal';
 import { OrderTicketModal } from './components/risk/OrderTicketModal';
 import { PortfolioDrawer } from './components/portfolio/PortfolioDrawer';
 import { ToastContainer, ToastItem } from './components/common/ToastContainer';
 
-type WorkspaceTab = 'payoff' | 'chain' | 'matrix';
+type WorkspaceTab = 'payoff' | 'chain' | 'matrix' | 'volatility' | 'portfolio';
 
 const DEFAULT_MARKET_PARAMS: MarketParams = {
   spotPrice: 37.8,
   riskFreeRate: 0.1425,
-  dividendYield: 0.1,
+  dividendYield: 0,
+  borrowRate: 0.005,
   dayCountConvention: 'du252',
+  popDriftMode: 'risk-neutral',
 };
 
 const DEFAULT_COST_CONFIG: CostConfig = {
@@ -69,8 +78,12 @@ const DEFAULT_COST_CONFIG: CostConfig = {
   brokeragePerLeg: 0,
   b3FeeRate: 0.000695,
   stockFeeRate: 0.0003,
+  includeExitCosts: true,
+  exerciseFeeRate: 0.0003,
+  exerciseBrokeragePerLeg: 0,
   includeIR: false,
   isDayTrade: false,
+  accumulatedLossOffset: 0,
 };
 
 function getInitialWorkspace() {
@@ -103,7 +116,6 @@ function getInitialWorkspace() {
     };
   }
 
-  // First-time cold start: realistic B3 chain + Bull Call Spread ready immediately
   const initialChain = generateRealisticB3Chain('PETR4', DEFAULT_MARKET_PARAMS);
   const initialExpiry = initialChain.chain[0]?.expirationDate || '';
   const defaultTemplate = STRATEGIES.find((s) => s.id === 'bull-call-spread') || STRATEGIES[0];
@@ -148,6 +160,7 @@ export default function App() {
     targetSpot: initial.marketParams.spotPrice,
     daysElapsed: 0,
     ivShiftPercent: 0,
+    ivShockMode: 'parallel',
   });
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('payoff');
@@ -261,11 +274,12 @@ export default function App() {
       selectedExpiry
     );
     setLegs(builtLegs);
-    setSimParams({
+    setSimParams((prev) => ({
+      ...prev,
       targetSpot: marketParams.spotPrice,
       daysElapsed: 0,
       ivShiftPercent: 0,
-    });
+    }));
     addToast(`Estratégia "${template.name}" montada para ${ticker}.`, 'success');
   };
 
@@ -286,6 +300,8 @@ export default function App() {
       ticker: option.ticker,
       type: option.type,
       action,
+      exerciseStyle:
+        option.exerciseStyle ?? inferDefaultB3ExerciseStyle(option.type, ticker),
       strike: option.strike,
       quantity: 100,
       price: Number(Math.max(0.01, chosenPrice).toFixed(2)),
@@ -318,22 +334,28 @@ export default function App() {
     const dte =
       marketData?.chain.find((o) => o.expirationDate === expiry)?.daysToMaturity ||
       fallbackExp.calendarDays;
-    const strike = type === 'Stock' ? marketParams.spotPrice : roundToB3Strike(marketParams.spotPrice);
+    const strike =
+      type === 'Stock' ? marketParams.spotPrice : roundToB3Strike(marketParams.spotPrice);
     const iv = type === 'Stock' ? 0 : 0.34;
-    const T = getTimeToMaturityYears(dte, marketParams.dayCountConvention);
+    const exerciseStyle =
+      type === 'Stock' ? undefined : inferDefaultB3ExerciseStyle(type, ticker);
+    const T = getTimeToMaturityYears(dte, marketParams.dayCountConvention, expiry);
+    const { rCont, qCont } = getContinuousMarketRates(marketParams);
+
     const price =
       type === 'Stock'
         ? marketParams.spotPrice
         : Math.max(
             0.05,
-            bsmPrice({
+            priceOption({
               S: marketParams.spotPrice,
               K: strike,
               T,
-              r: marketParams.riskFreeRate,
-              q: marketParams.dividendYield,
+              r: rCont,
+              q: qCont,
               sigma: iv,
               type,
+              exerciseStyle,
             })
           );
 
@@ -345,6 +367,7 @@ export default function App() {
           : generateB3OptionTicker(ticker, type, expiry, strike),
       type,
       action: 'Buy',
+      exerciseStyle,
       strike: Number(strike.toFixed(2)),
       quantity: 100,
       price: Number(price.toFixed(2)),
@@ -387,10 +410,28 @@ export default function App() {
         marketParams,
         costConfig,
         simParams.ivShiftPercent,
-        simParams.daysElapsed
+        simParams.daysElapsed,
+        simParams.ivShockMode ?? 'parallel',
+        marketData?.chain
       ),
-    [legs, marketParams, costConfig, simParams.ivShiftPercent, simParams.daysElapsed]
+    [
+      legs,
+      marketParams,
+      costConfig,
+      simParams.ivShiftPercent,
+      simParams.daysElapsed,
+      simParams.ivShockMode,
+      marketData?.chain,
+    ]
   );
+
+  const marketCacheMap = useMemo(() => {
+    const map = getCachedMarketSnapshot();
+    if (marketData) {
+      map[marketData.baseAsset.toUpperCase()] = marketData;
+    }
+    return map;
+  }, [marketData]);
 
   const activeStrategyTemplate = useMemo(
     () => STRATEGIES.find((s) => s.id === strategyId),
@@ -399,6 +440,10 @@ export default function App() {
 
   const activeStrategyName = activeStrategyTemplate?.name || 'Montagem Customizada';
   const activeLegsCount = useMemo(() => getActiveLegs(legs).length, [legs]);
+  const openPositionsCount = useMemo(
+    () => savedStrategies.filter((s) => s.status === 'Em Aberto').length,
+    [savedStrategies]
+  );
 
   const handleCopyShareLink = async () => {
     try {
@@ -428,10 +473,11 @@ export default function App() {
 
   const handleSaveToPortfolio = (name: string, status: TradeStatus, notes: string) => {
     const now = new Date().toISOString();
+    const sym = ticker.toUpperCase();
     const record: SavedStrategy = {
       id: generateLegId(),
       name,
-      ticker: ticker.toUpperCase(),
+      ticker: sym,
       strategyTemplateName: activeStrategyName,
       status,
       notes,
@@ -440,28 +486,66 @@ export default function App() {
       spotAtSave: marketParams.spotPrice,
       marketParams: { ...marketParams },
       legs: legs.map((l) => ({ ...l })),
+      adjustments: [],
+      betaToIbov: getDefaultBetaForTicker(sym),
     };
 
     const next = [record, ...savedStrategies];
     setSavedStrategies(next);
     persistSavedStrategies(next);
-    addToast(`Operação "${name}" salva no Diário.`, 'success');
+    addToast(`Operação "${name}" salva na Carteira/Diário.`, 'success');
   };
 
   const handleLoadSavedStrategy = (item: SavedStrategy) => {
     pushUndo(legs);
+    const refreshedLegs = refreshLegsDynamicDte(item.legs);
     setTicker(item.ticker);
-    setMarketParams(item.marketParams);
-    setLegs(item.legs);
+    setMarketParams({ ...DEFAULT_MARKET_PARAMS, ...item.marketParams });
+    setLegs(refreshedLegs);
     setStrategyId('custom');
     setMarketData(generateRealisticB3Chain(item.ticker, item.marketParams));
-    addToast(`Operação "${item.name}" carregada.`, 'success');
+    setActiveTab('payoff');
+    addToast(`Operação "${item.name}" carregada (DTE atualizado para hoje).`, 'success');
   };
 
-  const handleUpdateSavedStatus = (id: string, status: TradeStatus) => {
+  const handleUpdateSavedStatus = (id: string, status: TradeStatus, exitPnl?: number) => {
+    const now = new Date().toISOString();
     const next = savedStrategies.map((s) =>
-      s.id === id ? { ...s, status, updatedAt: new Date().toISOString() } : s
+      s.id === id
+        ? {
+            ...s,
+            status,
+            updatedAt: now,
+            ...(status === 'Encerrada'
+              ? { exitPnl: exitPnl ?? s.exitPnl ?? 0, closedAt: now }
+              : {}),
+          }
+        : s
     );
+    setSavedStrategies(next);
+    persistSavedStrategies(next);
+    if (status === 'Encerrada') {
+      addToast('Operação encerrada e resultado registrado na Carteira.', 'success');
+    }
+  };
+
+  const handleAddAdjustment = (id: string, adjustment: StrategyAdjustment) => {
+    const next = savedStrategies.map((s) =>
+      s.id === id
+        ? {
+            ...s,
+            adjustments: [...(s.adjustments ?? []), adjustment],
+            updatedAt: new Date().toISOString(),
+          }
+        : s
+    );
+    setSavedStrategies(next);
+    persistSavedStrategies(next);
+    addToast('Rolagem/ajuste registrado na operação.', 'success');
+  };
+
+  const handleUpdateBeta = (id: string, beta: number) => {
+    const next = savedStrategies.map((s) => (s.id === id ? { ...s, betaToIbov: beta } : s));
     setSavedStrategies(next);
     persistSavedStrategies(next);
   };
@@ -471,6 +555,17 @@ export default function App() {
     setSavedStrategies(next);
     persistSavedStrategies(next);
     addToast('Registro removido do Diário.', 'info');
+  };
+
+  const handleImportStrategies = (imported: SavedStrategy[]) => {
+    const existingIds = new Set(savedStrategies.map((s) => s.id));
+    const merged = [
+      ...imported.filter((s) => !existingIds.has(s.id)),
+      ...savedStrategies,
+    ];
+    setSavedStrategies(merged);
+    persistSavedStrategies(merged);
+    addToast(`${imported.length} registro(s) importado(s) para a Carteira.`, 'success');
   };
 
   return (
@@ -500,45 +595,79 @@ export default function App() {
       <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-5 space-y-4">
         {/* Workspace Navigation Tabs & Utility Actions */}
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <nav aria-label="Visualizações do terminal" className="inline-flex bg-[#0f1623] border border-slate-800 rounded-xl p-1 gap-1">
+          <nav
+            aria-label="Visualizações do terminal"
+            className="inline-flex flex-wrap bg-[#0f1623] border border-slate-800 rounded-xl p-1 gap-1"
+          >
             <button
               type="button"
               id="tab-payoff"
               onClick={() => setActiveTab('payoff')}
-              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
                 activeTab === 'payoff'
                   ? 'bg-sky-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
               }`}
             >
               <TrendingUp size={14} />
-              <span>Payoff & Estrutura</span>
+              <span>Payoff</span>
             </button>
             <button
               type="button"
               id="tab-chain"
               onClick={() => setActiveTab('chain')}
-              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
                 activeTab === 'chain'
                   ? 'bg-sky-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
               }`}
             >
               <Target size={14} />
-              <span>Option Chain B3</span>
+              <span>Option Chain</span>
             </button>
             <button
               type="button"
               id="tab-matrix"
               onClick={() => setActiveTab('matrix')}
-              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
                 activeTab === 'matrix'
                   ? 'bg-sky-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
               }`}
             >
               <Grid size={14} />
-              <span>Matriz Preço × Data</span>
+              <span>Matriz</span>
+            </button>
+            <button
+              type="button"
+              id="tab-volatility"
+              onClick={() => setActiveTab('volatility')}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                activeTab === 'volatility'
+                  ? 'bg-sky-600 text-white'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
+              }`}
+            >
+              <Activity size={14} />
+              <span>Volatilidade</span>
+            </button>
+            <button
+              type="button"
+              id="tab-portfolio"
+              onClick={() => setActiveTab('portfolio')}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                activeTab === 'portfolio'
+                  ? 'bg-sky-600 text-white'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
+              }`}
+            >
+              <Briefcase size={14} />
+              <span>Carteira</span>
+              {openPositionsCount > 0 && (
+                <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono text-[10px]">
+                  {openPositionsCount}
+                </span>
+              )}
             </button>
           </nav>
 
@@ -565,9 +694,16 @@ export default function App() {
         </div>
 
         {/* 12-Column Responsive Layout */}
-        <div ref={workspaceCaptureRef} className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
-          {/* Primary Workspace (8 cols) */}
-          <div className="xl:col-span-8 space-y-5 min-w-0">
+        <div
+          ref={workspaceCaptureRef}
+          className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start"
+        >
+          {/* Primary Workspace (8 cols, or full 12 cols on Portfolio view) */}
+          <div
+            className={`${
+              activeTab === 'portfolio' ? 'xl:col-span-12' : 'xl:col-span-8'
+            } space-y-5 min-w-0`}
+          >
             {activeTab === 'payoff' && (
               <PayoffChart
                 legs={legs}
@@ -596,42 +732,73 @@ export default function App() {
                 marketParams={marketParams}
                 costConfig={costConfig}
                 ivShiftPercent={simParams.ivShiftPercent}
+                ivShockMode={simParams.ivShockMode}
                 capitalBase={metrics.estimatedMargin}
               />
             )}
 
-            {/* Legs Builder is always accessible below the primary visualization */}
-            <LegsTable
-              legs={legs}
-              ticker={ticker}
-              marketParams={marketParams}
-              onAddManualLeg={handleAddManualLeg}
-              onUpdateLeg={handleUpdateLeg}
-              onDuplicateLeg={handleDuplicateLeg}
-              onRemoveLeg={handleRemoveLeg}
-              onClearLegs={handleClearLegs}
-              canUndo={undoStack.length > 0}
-              onUndo={handleUndo}
-            />
+            {activeTab === 'volatility' && (
+              <VolatilityPanel
+                marketData={marketData}
+                spotPrice={marketParams.spotPrice}
+                selectedExpiry={selectedExpiry}
+                onSelectExpiry={setSelectedExpiry}
+                legs={legs}
+              />
+            )}
+
+            {activeTab === 'portfolio' && (
+              <PortfolioView
+                strategies={savedStrategies}
+                marketCache={marketCacheMap}
+                activeTicker={ticker}
+                activeSpotPrice={marketParams.spotPrice}
+                onLoadStrategy={handleLoadSavedStrategy}
+                onUpdateStatus={handleUpdateSavedStatus}
+                onAddAdjustment={handleAddAdjustment}
+                onUpdateBeta={handleUpdateBeta}
+                onDeleteStrategy={handleDeleteSaved}
+                onImportStrategies={handleImportStrategies}
+                onOpenSaveDrawer={() => setIsPortfolioOpen(true)}
+              />
+            )}
+
+            {/* Legs Builder is always accessible below non-portfolio primary views */}
+            {activeTab !== 'portfolio' && (
+              <LegsTable
+                legs={legs}
+                ticker={ticker}
+                marketParams={marketParams}
+                onAddManualLeg={handleAddManualLeg}
+                onUpdateLeg={handleUpdateLeg}
+                onDuplicateLeg={handleDuplicateLeg}
+                onRemoveLeg={handleRemoveLeg}
+                onClearLegs={handleClearLegs}
+                canUndo={undoStack.length > 0}
+                onUndo={handleUndo}
+              />
+            )}
           </div>
 
           {/* Persistent Risk & Greeks Sidebar (4 cols) */}
-          <div className="xl:col-span-4 min-w-0">
-            <RiskPanel
-              metrics={metrics}
-              spotPrice={marketParams.spotPrice}
-              costConfig={costConfig}
-              onCostConfigChange={(patch) => setCostConfig((prev) => ({ ...prev, ...patch }))}
-              strategyTemplate={activeStrategyTemplate}
-            />
-          </div>
+          {activeTab !== 'portfolio' && (
+            <div className="xl:col-span-4 min-w-0">
+              <RiskPanel
+                metrics={metrics}
+                spotPrice={marketParams.spotPrice}
+                costConfig={costConfig}
+                onCostConfigChange={(patch) => setCostConfig((prev) => ({ ...prev, ...patch }))}
+                strategyTemplate={activeStrategyTemplate}
+              />
+            </div>
+          )}
         </div>
       </main>
 
       {/* Compliance Footer */}
       <footer className="border-t border-slate-800/80 mt-6 py-4 px-4 sm:px-6 text-center text-[11px] text-slate-400">
-        Terminal de Opções B3 — Simulador analítico educacional e de apoio operacional. Não constitui recomendação de investimento.
-        Cálculos de margem (CORE B3), emolumentos e tributação são estimativas; confirme no Home Broker/corretora antes da execução.
+        Terminal de Opções B3 — Simulador analítico quantitativo de apoio operacional. Não constitui recomendação de investimento.
+        Estimativas de margem por cenários (Proxy CORE B3), emolumentos/exercício e tributação devem ser confirmadas na corretora antes da execução.
       </footer>
 
       {/* Modals & Drawers */}
@@ -663,7 +830,7 @@ export default function App() {
         hasActiveLegs={activeLegsCount > 0}
         onSaveCurrent={handleSaveToPortfolio}
         onLoadStrategy={handleLoadSavedStrategy}
-        onUpdateStatus={handleUpdateSavedStatus}
+        onUpdateStatus={(id, status) => handleUpdateSavedStatus(id, status)}
         onDeleteStrategy={handleDeleteSaved}
       />
     </div>
